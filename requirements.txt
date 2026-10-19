@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn==0.31.0
+python-multipart==0.0.12
+pypdf==5.1.0
+pypdfium2>=4.30.0
+Pillow>=10.0.0
+fastembed>=0.4.0
+numpy>=1.26.0
+rank-bm25>=0.2.2
+openai>=1.50.0
+python-dotenv>=1.0.0
+pytest>=8.0.0

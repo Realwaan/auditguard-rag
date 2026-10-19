@@ -1,0 +1,22 @@
+# GLOBAL VIRTUAL ASSISTANT SERVICE LEVEL AGREEMENT & ESCALATION SOP
+
+1. PURPOSE & SCOPE OF ENGAGEMENT
+This Agreement governs all remote virtual assistant, administrative, and data verification operations provided by ALMA Talent Solutions. All remote personnel must maintain compliance with enterprise data security protocols (ISO 27001).
+
+2. SYSTEM UPTIME & RESPONSE TIME SLA
+2.1 Uptime Guarantee: The service provider guarantees 99.9% availability during standard client business hours (08:00 to 18:00 EST).
+2.2 Penalty Credit: In the event that service availability drops below 99.5% in any calendar billing month, the client shall be entitled to an immediate 15% billing credit applied to the next invoice cycle. If availability drops below 99.0%, a 25% credit shall apply.
+
+3. DATA PROTECTION & ZERO-TRUST SECURITY
+3.1 Access Control: Remote virtual assistants shall never store client credentials on personal local drives. All authentication must occur through hardware-enforced MFA or enterprise SSO.
+3.2 Incident Escalation Flowchart (Figure 1):
+- Step 1: Any unauthorized data access alert must be logged within 15 minutes of occurrence.
+- Step 2: Immediate written notice must be submitted to the Client Security Officer (security@client.corp) within 1 hour.
+- Step 3: All active VPN sessions for the affected contractor account must be terminated immediately.
+
+4. WIRE TRANSFERS & FINANCIAL AUTHORIZATION
+4.1 Dual Authorization: Wire transfers or account disbursements exceeding $50,000 require written sign-off from both the Chief Financial Officer (CFO) and the Managing Director.
+4.2 Audit Retention: All wire transfer authorization records must be archived in encrypted cold storage for a minimum period of 7 years.
+
+5. TERMINATION FOR CONVENIENCE
+Either party may terminate this agreement without cause by providing at least 30 business days prior written notice. Early termination fees are explicitly waived after the initial 6-month contract anniversary.

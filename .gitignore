@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+env/
+venv/
+data/index/
+data/docs/*
+!data/docs/sample_enterprise_sop.txt
+app/static/previews/*
+!app/static/previews/.gitkeep
+.pytest_cache/
