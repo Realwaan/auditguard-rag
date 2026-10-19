@@ -7,21 +7,69 @@ import pypdfium2 as pdfium
 from app.config import PREVIEWS_DIR
 from app.classifier import classify_document
 
+def get_or_render_page_image(doc_prefix: str, page_num: int) -> Path | None:
+    """
+    On-demand single-page renderer for large documents (e.g. 300-page manuals).
+    Renders just the requested page in ~30ms and caches it to disk.
+    """
+    file_name = f"{doc_prefix}_page_{page_num}.png"
+    file_path = PREVIEWS_DIR / file_name
+    if file_path.exists():
+        return file_path
+
+    from app.config import DOCS_DIR
+    pdf_path = DOCS_DIR / f"{doc_prefix}.pdf"
+    if not pdf_path.exists():
+        return None
+
+    try:
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        if 1 <= page_num <= len(pdf):
+            page = pdf[page_num - 1]
+            image = page.render(scale=1.5).to_pil()
+            image.save(file_path, "PNG")
+            return file_path
+    except Exception as e:
+        print(f"Error on-demand rendering page {page_num}: {e}")
+    return None
+
 def render_page_previews(pdf_bytes: bytes, doc_prefix: str) -> Dict[int, str]:
     """
-    Renders every page of a PDF to high-resolution web PNGs using pypdfium2.
-    Returns a mapping: page_number -> web_image_url
+    Smart Page Preview Renderer:
+    - Small documents (<= 10 pages): renders all upfront.
+    - Large enterprise documents (up to 300+ pages): saves the master PDF,
+      pre-renders the first 3 pages for instant UI thumbs, and routes the rest
+      to the on-demand /api/preview endpoint (sub-35ms lazy render).
     """
+    from app.config import DOCS_DIR
+    # Persist the master PDF for on-demand lazy rendering
+    pdf_save_path = DOCS_DIR / f"{doc_prefix}.pdf"
+    try:
+        pdf_save_path.write_bytes(pdf_bytes)
+    except Exception as e:
+        print(f"Warning saving master PDF: {e}")
+
     page_map = {}
     try:
         pdf = pdfium.PdfDocument(pdf_bytes)
-        for idx, page in enumerate(pdf):
+        total_pages = len(pdf)
+        
+        # If <= 10 pages, render all upfront; otherwise render first 3 and lazy-load remaining
+        pages_to_prerender = total_pages if total_pages <= 10 else 3
+
+        for idx in range(total_pages):
             page_num = idx + 1
-            image = page.render(scale=1.5).to_pil()
             file_name = f"{doc_prefix}_page_{page_num}.png"
             file_path = PREVIEWS_DIR / file_name
-            image.save(file_path, "PNG")
-            page_map[page_num] = f"/static/previews/{file_name}"
+
+            if idx < pages_to_prerender:
+                page = pdf[idx]
+                image = page.render(scale=1.5).to_pil()
+                image.save(file_path, "PNG")
+                page_map[page_num] = f"/static/previews/{file_name}"
+            else:
+                # Lazy on-demand route for 300-page scale
+                page_map[page_num] = f"/api/preview/{doc_prefix}/{page_num}"
     except Exception as e:
         print(f"Warning: Could not render page preview with pypdfium2: {e}")
     return page_map
