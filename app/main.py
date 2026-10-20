@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -109,7 +110,7 @@ async def upload_document(file: UploadFile = File(...)):
 
     # 4. Dense Vector Embeddings (Child Sentences)
     child_texts = [c["child_text"] for c in chunks]
-    embeddings_matrix = embed_texts(child_texts)
+    embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
 
     # 5. Index into LanceDB (In-Process Columnar Vector Engine)
     try:
@@ -382,7 +383,7 @@ Either party may terminate this agreement without cause by providing at least 30
     ACTIVE_CHUNKS = chunks
 
     child_texts = [c["child_text"] for c in chunks]
-    embeddings_matrix = embed_texts(child_texts)
+    embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
     ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix)
     ACTIVE_DOC_ID = sample_doc_id
 

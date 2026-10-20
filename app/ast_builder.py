@@ -203,16 +203,23 @@ def extract_halo_crops(
                 "visual_type": "table",
             })
 
-        # Process and crop each candidate with Halo expansion
+        # Process and crop each candidate with Halo expansion (cached page raster)
+        pil_page = None
         for v_idx, cand in enumerate(candidate_boxes, 1):
             vis_id = f"{doc_id}_vis_p{page_num}_{v_idx}"
             bbox = cand.get("bbox", (50.0, 100.0, width_pt - 50.0, height_pt - 100.0))
 
-            x0, y0, x1, y1 = bbox
+            # Sanitize coordinates: ensure x0 <= x1 and y0 <= y1
+            raw_x0, raw_y0, raw_x1, raw_y1 = bbox
+            x0 = min(raw_x0, raw_x1)
+            x1 = max(raw_x0, raw_x1)
+            y0 = min(raw_y0, raw_y1)
+            y1 = max(raw_y0, raw_y1)
+
             w = max(1.0, x1 - x0)
             h = max(1.0, y1 - y0)
 
-            # 12% Halo Expansion (bounded by page margins)
+            # 12% Collision-Bounded Halo Expansion (bounded by page margins)
             halo_x = w * 0.12
             halo_y = h * 0.12
             crop_x0 = max(0.0, x0 - halo_x)
@@ -220,22 +227,23 @@ def extract_halo_crops(
             crop_y0 = max(0.0, y0 - halo_y)
             crop_y1 = min(height_pt, y1 + halo_y)
 
-            # Render page at 2.0x scale (144 DPI) for sharp visual fidelity
-            scale = 2.0
-            pil_page = page.render(scale=scale).to_pil()
+            # Lazy render page once per page at 2.0x scale (144 DPI)
+            if pil_page is None:
+                scale = 2.0
+                pil_page = page.render(scale=scale).to_pil()
             img_w, img_h = pil_page.size
 
             # Convert PDF pt coords (origin bottom-left) to PIL image coords (origin top-left)
-            img_x0 = int((crop_x0 / width_pt) * img_w)
-            img_x1 = int((crop_x1 / width_pt) * img_w)
-            img_y0 = int(((height_pt - crop_y1) / height_pt) * img_h)
-            img_y1 = int(((height_pt - crop_y0) / height_pt) * img_h)
+            calc_x0 = int((crop_x0 / width_pt) * img_w)
+            calc_x1 = int((crop_x1 / width_pt) * img_w)
+            calc_y0 = int(((height_pt - crop_y1) / height_pt) * img_h)
+            calc_y1 = int(((height_pt - crop_y0) / height_pt) * img_h)
 
-            # Clamp bounding box
-            img_x0 = max(0, min(img_w - 1, img_x0))
-            img_x1 = max(img_x0 + 1, min(img_w, img_x1))
-            img_y0 = max(0, min(img_h - 1, img_y0))
-            img_y1 = max(img_y0 + 1, min(img_h, img_y1))
+            # Strict boundary clamp ensuring positive rectangle area
+            img_x0 = max(0, min(img_w - 2, min(calc_x0, calc_x1)))
+            img_x1 = max(img_x0 + 1, min(img_w, max(calc_x0, calc_x1)))
+            img_y0 = max(0, min(img_h - 2, min(calc_y0, calc_y1)))
+            img_y1 = max(img_y0 + 1, min(img_h, max(calc_y0, calc_y1)))
 
             cropped_img = pil_page.crop((img_x0, img_y0, img_x1, img_y1))
             crop_file_name = f"{vis_id}.webp"
