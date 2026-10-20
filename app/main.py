@@ -1,5 +1,7 @@
 import json
 import os
+import time
+from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -97,11 +99,21 @@ async def upload_document(file: UploadFile = File(...)):
         "classification": ACTIVE_CLASSIFICATION
     }
 
+class ExportReportRequest(BaseModel):
+    query: str
+    answer: str
+    sources: list = []
+    classification: dict = {}
+    evaluation: dict = {}
+    baseline: str = ""
+    format: str = "markdown"
+
 @app.post("/ask")
 async def ask_question(payload: QueryRequest):
     """
     Standard JSON endpoint for AuditGuard Q&A.
-    Returns Grounded Answer, Proof Drawer sources, CRAG Evaluation, and Plain Gemma Baseline.
+    Returns Grounded Answer, Proof Drawer sources, CRAG Evaluation, Plain Gemma Baseline,
+    exact retrieval latency in milliseconds, and estimated token usage.
     """
     global ACTIVE_RETRIEVER, ACTIVE_CLASSIFICATION
     if not ACTIVE_RETRIEVER:
@@ -111,13 +123,20 @@ async def ask_question(payload: QueryRequest):
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
-    # 1. Hybrid RRF Retrieval
+    # 1. Hybrid RRF Retrieval with Microsecond Benchmarking
+    t0 = time.perf_counter()
     retrieved = ACTIVE_RETRIEVER.retrieve(query, top_k=TOP_K)
+    retrieval_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-    # 2. CRAG Relevance Gatekeeper
+    # 2. Token Usage Estimation (~1.33 tokens per English word + 200 system tokens)
+    context_words = sum(len(c.get("parent_text", "").split()) for c in retrieved)
+    query_words = len(query.split())
+    estimated_tokens = int((context_words + query_words) * 1.33 + 200)
+
+    # 3. CRAG Relevance Gatekeeper
     eval_result = evaluate_relevance(retrieved)
 
-    # 3. Check for Defense Refusal
+    # 4. Check for Defense Refusal
     if eval_result["status"] == "REFUSE":
         plain_baseline = call_plain_gemma(query) if payload.include_baseline else ""
         return {
@@ -127,14 +146,16 @@ async def ask_question(payload: QueryRequest):
             "answer": eval_result["reason"],
             "sources": [],
             "baseline": plain_baseline,
-            "classification": ACTIVE_CLASSIFICATION
+            "classification": ACTIVE_CLASSIFICATION,
+            "retrieval_ms": retrieval_ms,
+            "estimated_tokens": estimated_tokens
         }
 
-    # 4. Synthesize Grounded Answer with Gemma 4
+    # 5. Synthesize Grounded Answer with Gemma 4
     persona = ACTIVE_CLASSIFICATION.get("prompt_addon", "")
     grounded_answer = generate_grounded_answer(query, retrieved, persona)
 
-    # 5. Baseline for Side-by-Side Comparison (Hallucination Radar)
+    # 6. Baseline for Side-by-Side Comparison (Hallucination Radar)
     plain_baseline = call_plain_gemma(query) if payload.include_baseline else ""
 
     return {
@@ -144,7 +165,9 @@ async def ask_question(payload: QueryRequest):
         "answer": grounded_answer,
         "sources": retrieved,
         "baseline": plain_baseline,
-        "classification": ACTIVE_CLASSIFICATION
+        "classification": ACTIVE_CLASSIFICATION,
+        "retrieval_ms": retrieval_ms,
+        "estimated_tokens": estimated_tokens
     }
 
 @app.get("/ask-stream")
@@ -173,12 +196,96 @@ async def ask_stream(query: str):
 async def get_preview_image(doc_prefix: str, page_num: int):
     """
     On-Demand Visual Audit Proof Renderer:
-    Renders and serves high-res single page previews for 300-page PDFs in ~30ms.
+    Renders and serves high-res single page previews for 300-page PDFs in ~30ms (supports WebP & PNG).
     """
     img_path = get_or_render_page_image(doc_prefix, page_num)
     if img_path and img_path.exists():
-        return FileResponse(str(img_path), media_type="image/png")
+        media_type = "image/webp" if img_path.suffix.lower() == ".webp" else "image/png"
+        return FileResponse(str(img_path), media_type=media_type)
     raise HTTPException(status_code=404, detail="Page preview could not be generated.")
+
+@app.post("/export-report")
+async def export_report(payload: ExportReportRequest):
+    """
+    Downloads audited compliance analysis as .md or .json.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    file_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    doc_label = payload.classification.get("label", "General Document")
+    doc_type = payload.classification.get("type", "UNKNOWN")
+    confidence = payload.evaluation.get("confidence", 0.0)
+    badge = payload.evaluation.get("badge", "UNVERIFIED")
+
+    if payload.format.lower() == "json":
+        export_data = {
+            "title": "AuditGuard Compliance Verification Report",
+            "timestamp": timestamp,
+            "document_type": doc_type,
+            "document_classification": doc_label,
+            "confidence_score": confidence,
+            "status_badge": badge,
+            "query": payload.query,
+            "grounded_answer": payload.answer,
+            "unverified_baseline": payload.baseline,
+            "sources": payload.sources
+        }
+        return JSONResponse(
+            content=export_data,
+            headers={"Content-Disposition": f'attachment; filename="audit_trail_{file_timestamp}.json"'}
+        )
+
+    # Markdown format
+    md_lines = [
+        f"# 🛡️ AuditGuard Compliance Verification Report",
+        f"**Generated:** {timestamp} | **Document Type:** {doc_label} (`{doc_type}`)",
+        f"**Audit Status:** `{badge}` | **Confidence:** `{round(confidence * 100, 1)}%`",
+        f"",
+        f"---",
+        f"",
+        f"## 1. Compliance Audit Query",
+        f"> {payload.query}",
+        f"",
+        f"## 2. Verified Grounded Finding (Gemma 4)",
+        f"{payload.answer}",
+        f"",
+    ]
+
+    if payload.baseline:
+        md_lines.extend([
+            f"## 3. Hallucination Radar (Baseline Comparison)",
+            f"**Plain Gemma 4 (No RAG):**",
+            f"> {payload.baseline}",
+            f"",
+        ])
+
+    md_lines.extend([
+        f"## 4. Source Evidence & Visual Provenance Trail",
+        f"| Citation | Document | Page | Confidence | Clause Excerpt |",
+        f"| :--- | :--- | :--- | :--- | :--- |"
+    ])
+
+    for s in payload.sources:
+        cid = s.get("citation_id", 1)
+        doc = s.get("filename", "Doc")
+        page = s.get("page", 1)
+        score = round(s.get("dense_score", 0.0) * 100, 1)
+        excerpt = s.get("parent_text", s.get("child_text", "")).replace("\n", " ").strip()
+        if len(excerpt) > 120:
+            excerpt = excerpt[:117] + "..."
+        md_lines.append(f"| `[{cid}]` | {doc} | Page {page} | {score}% | {excerpt} |")
+
+    md_lines.extend([
+        f"",
+        f"---",
+        f"*Report certified by AuditGuard RAG Engine • Built for ALMA Future Forge Hackathon 2026*"
+    ])
+
+    md_content = "\n".join(md_lines)
+    return HTMLResponse(
+        content=md_content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="audit_report_{file_timestamp}.md"'}
+    )
 
 @app.post("/load-sample")
 async def load_sample_document():

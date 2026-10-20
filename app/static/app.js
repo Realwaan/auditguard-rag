@@ -1,6 +1,7 @@
 // AuditGuard RAG - Frontend Client Logic
 
 let ACTIVE_SOURCES = [];
+let LAST_QUERY_DATA = null;
 
 document.addEventListener("DOMContentLoaded", () => {
     setupUploadHandlers();
@@ -168,6 +169,12 @@ async function submitQuery() {
 
         const data = await response.json();
         btn.disabled = false;
+        LAST_QUERY_DATA = data;
+
+        const metricsBadge = document.getElementById("metrics-badge");
+        if (metricsBadge && data.retrieval_ms !== undefined) {
+            metricsBadge.innerText = `⚡ ${data.retrieval_ms}ms | ~${data.estimated_tokens || 0} tok`;
+        }
 
         if (!response.ok) {
             answerContainer.innerHTML = `<p class="text-red-400">❌ ${data.detail || "Error querying system"}</p>`;
@@ -244,4 +251,49 @@ function openProofDrawer(source) {
 
 function closeProofDrawer() {
     document.getElementById("proof-drawer").classList.add("translate-x-full");
+}
+
+async function downloadReport(format = "markdown") {
+    if (!LAST_QUERY_DATA) {
+        alert("Please ask a question first before exporting an audit report.");
+        return;
+    }
+
+    try {
+        const payload = {
+            query: LAST_QUERY_DATA.query,
+            answer: LAST_QUERY_DATA.answer,
+            sources: LAST_QUERY_DATA.sources || [],
+            classification: LAST_QUERY_DATA.classification || {},
+            evaluation: LAST_QUERY_DATA.evaluation || {},
+            baseline: LAST_QUERY_DATA.baseline || "",
+            format: format
+        };
+
+        const response = await fetch("/export-report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) throw new Error("Export failed");
+
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition");
+        let filename = format === "json" ? "audit_trail.json" : "audit_report.md";
+        if (disposition && disposition.includes("filename=")) {
+            filename = disposition.split("filename=")[1].replace(/["']/g, "");
+        }
+
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        a.remove();
+    } catch (err) {
+        alert("Error exporting audit report: " + err);
+    }
 }
