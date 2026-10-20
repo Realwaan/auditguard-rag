@@ -16,8 +16,9 @@ DATA_DIR = BASE_DIR / "data"
 DOCS_DIR = DATA_DIR / "docs"
 INDEX_DIR = DATA_DIR / "index"
 PREVIEWS_DIR = BASE_DIR / "app" / "static" / "previews"
+CROPS_DIR = BASE_DIR / "app" / "static" / "crops"
 
-for d in [DOCS_DIR, INDEX_DIR, PREVIEWS_DIR]:
+for d in [DOCS_DIR, INDEX_DIR, PREVIEWS_DIR, CROPS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Retrieval & Guardrail Thresholds

@@ -5,13 +5,18 @@ This Agreement governs all remote virtual assistant, administrative, and data ve
 
 2. SYSTEM UPTIME & RESPONSE TIME SLA
 2.1 Uptime Guarantee: The service provider guarantees 99.9% availability during standard client business hours (08:00 to 18:00 EST).
-2.2 Penalty Credit: In the event that service availability drops below 99.5% in any calendar billing month, the client shall be entitled to an immediate 15% billing credit applied to the next invoice cycle. If availability drops below 99.0%, a 25% credit shall apply.
+2.2 Penalty Credit: In the event that service availability drops below 99.5% in any calendar billing month, the client shall be entitled to an immediate 15% billing credit applied to the next invoice cycle.
+Table 1: Q3 Historical Availability & Outage Log:
+| Month | Target SLA | Actual Uptime | Outage Minutes | Penalty Credit Due |
+| July | 99.9% | 99.95% | 12 min | 0% |
+| August | 99.9% | 99.80% | 45 min | 0% |
+| September | 99.9% | 98.20% | 420 min | 15% Penalty Due (Breach) |
 
 3. DATA PROTECTION & ZERO-TRUST SECURITY
 3.1 Access Control: Remote virtual assistants shall never store client credentials on personal local drives. All authentication must occur through hardware-enforced MFA or enterprise SSO.
 3.2 Incident Escalation Flowchart (Figure 1):
 - Step 1: Any unauthorized data access alert must be logged within 15 minutes of occurrence.
-- Step 2: Immediate written notice must be submitted to the Client Security Officer (security@client.corp) within 1 hour.
+- Step 2: Immediate written notice must be submitted to the Client Security Officer within 1 hour.
 - Step 3: All active VPN sessions for the affected contractor account must be terminated immediately.
 
 4. WIRE TRANSFERS & FINANCIAL AUTHORIZATION
