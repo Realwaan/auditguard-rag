@@ -3,10 +3,11 @@ from openai import OpenAI
 from app.config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 
 def get_openai_client() -> OpenAI:
-    """Returns an OpenAI SDK client configured for ALMA Gemma 4 server."""
+    """Returns an OpenAI SDK client configured for ALMA Gemma 4 server with an 8s timeout safeguard."""
     return OpenAI(
         base_url=LLM_BASE_URL,
-        api_key=LLM_API_KEY or "alma-hackathon-token"
+        api_key=LLM_API_KEY or "alma-hackathon-token",
+        timeout=8.0
     )
 
 def call_plain_gemma(prompt: str) -> str:
