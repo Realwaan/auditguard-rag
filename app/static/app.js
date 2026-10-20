@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setupUploadHandlers();
     setupCompareToggle();
     checkInitialHealth();
+    loadVault();
 });
 
 function checkInitialHealth() {
@@ -16,6 +17,7 @@ function checkInitialHealth() {
             if (data.doc_loaded) {
                 updateDocBadge(data.classification || "General Enterprise Document", "📄");
             }
+            loadVault();
         })
         .catch(() => {});
 }
@@ -75,6 +77,7 @@ function handleFileUpload(file) {
         if (data.classification) {
             updateDocBadge(data.classification.label, data.classification.icon);
         }
+        loadVault();
     })
     .catch(err => {
         chunksEl.innerText = "Error indexing file";
@@ -99,6 +102,7 @@ function loadSampleDoc() {
             statusBox.classList.remove("hidden");
             document.getElementById("upload-filename").innerText = data.filename;
             document.getElementById("upload-chunks").innerText = `${data.total_chunks} chunks ready`;
+            loadVault();
             setTimeout(() => { btn.innerHTML = originalText; btn.disabled = false; }, 2000);
         })
         .catch(err => {
@@ -296,4 +300,144 @@ async function downloadReport(format = "markdown") {
     } catch (err) {
         alert("Error exporting audit report: " + err);
     }
+}
+
+// Enterprise Document Vault Functions
+function loadVault() {
+    fetch("/vault")
+        .then(r => r.json())
+        .then(data => {
+            const list = document.getElementById("vault-list");
+            const badge = document.getElementById("vault-count-badge");
+            if (!list) return;
+            const items = data.vault || [];
+            if (badge) badge.innerText = `${items.length} Docs`;
+            if (items.length === 0) {
+                list.innerHTML = `<p class="text-[11px] text-slate-500 italic py-2 text-center">No documents in vault yet. Upload or load sample.</p>`;
+                return;
+            }
+            list.innerHTML = "";
+            items.forEach(doc => {
+                const row = document.createElement("div");
+                row.className = `p-2 rounded-lg border text-xs flex items-center justify-between cursor-pointer transition ${
+                    doc.is_active ? 'bg-emerald-950/40 border-emerald-500/60 text-emerald-200' : 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-slate-300'
+                }`;
+                row.onclick = () => selectVaultDoc(doc.doc_id);
+                row.innerHTML = `
+                    <div class="truncate max-w-[180px]">
+                        <p class="font-medium truncate">${doc.filename}</p>
+                        <p class="text-[10px] text-slate-400 font-mono">${doc.total_chunks} chunks • ${doc.uploaded_at}</p>
+                    </div>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded ${doc.is_active ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-400 font-mono'}">
+                        ${doc.is_active ? 'ACTIVE' : 'SELECT'}
+                    </span>
+                `;
+                list.appendChild(row);
+            });
+        })
+        .catch(() => {});
+}
+
+function selectVaultDoc(docId) {
+    fetch(`/vault/select/${docId}`, { method: "POST" })
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                if (data.classification) {
+                    updateDocBadge(data.classification.label, data.classification.icon);
+                }
+                loadVault();
+            }
+        });
+}
+
+// Enterprise Compliance Audit Scanner Modal Logic
+let CURRENT_AUDIT_DATA = null;
+
+function openComplianceAuditModal() {
+    const modal = document.getElementById("compliance-modal");
+    modal.classList.remove("hidden");
+    
+    const valueEl = document.getElementById("audit-score-value");
+    const badgeEl = document.getElementById("audit-verdict-badge");
+    const ratioEl = document.getElementById("audit-ratio-text");
+    const container = document.getElementById("audit-checklist-container");
+
+    valueEl.innerText = "--%";
+    badgeEl.innerText = "Scanning in Memory...";
+    badgeEl.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700 animate-pulse";
+    ratioEl.innerText = "Checking 6 controls...";
+    container.innerHTML = `<p class="text-xs text-slate-400 animate-pulse py-4 text-center">Executing Vector & BM25 Multi-Point Compliance Audit in RAM...</p>`;
+
+    fetch("/compliance-audit")
+        .then(r => {
+            if (!r.ok) throw new Error("Please upload or load a document first.");
+            return r.json();
+        })
+        .then(data => {
+            CURRENT_AUDIT_DATA = data;
+            document.getElementById("modal-audit-subtitle").innerText = `Audit for: ${data.filename} (${data.classification ? data.classification.label : 'Enterprise Contract'})`;
+            valueEl.innerText = `${data.overall_score}%`;
+            badgeEl.innerText = data.verdict;
+            ratioEl.innerText = `${data.passed_count} of ${data.total_checks} Controls Verified`;
+
+            if (data.overall_score >= 80) {
+                badgeEl.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-950 text-emerald-300 border border-emerald-800";
+                valueEl.className = "text-3xl font-black text-emerald-400 font-mono mt-0.5";
+            } else {
+                badgeEl.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-950 text-amber-300 border border-amber-800";
+                valueEl.className = "text-3xl font-black text-amber-400 font-mono mt-0.5";
+            }
+
+            container.innerHTML = "";
+            data.checklist.forEach(item => {
+                const isPass = item.status === "PASS";
+                const row = document.createElement("div");
+                row.className = `p-3 rounded-xl border flex items-start justify-between gap-3 transition ${
+                    isPass ? 'bg-slate-950/80 border-slate-800 hover:border-emerald-500/50' : 'bg-red-950/20 border-red-900/40'
+                }`;
+                row.innerHTML = `
+                    <div class="flex-1">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-[10px] font-mono px-1.5 py-0.2 rounded ${isPass ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'}">${item.id}</span>
+                            <span class="text-xs font-bold text-white">${item.title}</span>
+                            <span class="text-[10px] text-slate-400">(${item.category})</span>
+                        </div>
+                        <p class="text-[11px] ${isPass ? 'text-slate-300' : 'text-red-300 font-medium'}">${item.finding}</p>
+                        ${isPass ? `<p class="text-[10px] text-slate-500 mt-1 italic font-mono truncate">"${item.clause_excerpt}"</p>` : ''}
+                    </div>
+                    <div class="text-right flex flex-col items-end gap-1">
+                        <span class="text-[10px] px-2 py-0.5 rounded font-bold font-mono ${isPass ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-red-500/20 text-red-300 border border-red-500/40'}">${item.badge}</span>
+                        ${isPass ? `
+                            <button onclick='inspectAuditItem(${JSON.stringify(item)})' class="text-[10px] text-emerald-400 hover:text-emerald-300 font-semibold underline mt-1 flex items-center gap-1 cursor-pointer">
+                                <span>Inspect Page ${item.page}</span> →
+                            </button>
+                        ` : `
+                            <span class="text-[9px] text-red-400 font-mono">RISK: ${item.criticality}</span>
+                        `}
+                    </div>
+                `;
+                container.appendChild(row);
+            });
+            if (window.lucide) lucide.createIcons();
+        })
+        .catch(err => {
+            badgeEl.innerText = "Error";
+            badgeEl.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-red-950 text-red-400 border border-red-800";
+            container.innerHTML = `<p class="text-xs text-red-400 py-4 text-center">❌ ${err.message}</p>`;
+        });
+}
+
+function closeComplianceAuditModal() {
+    document.getElementById("compliance-modal").classList.add("hidden");
+}
+
+function inspectAuditItem(item) {
+    closeComplianceAuditModal();
+    openProofDrawer({
+        filename: document.getElementById("modal-audit-subtitle") ? document.getElementById("modal-audit-subtitle").innerText : "Document",
+        page: item.page,
+        parent_text: item.full_clause || item.clause_excerpt,
+        image_url: item.image_url
+    });
 }

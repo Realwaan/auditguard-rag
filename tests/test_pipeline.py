@@ -34,3 +34,20 @@ def test_evaluator_crag_acceptance():
     eval_res = evaluate_relevance(dummy_chunks)
     assert eval_res["status"] == "SYNTHESIZE"
     assert "GROUNDED" in eval_res["badge"]
+
+def test_compliance_audit_scanner():
+    from app.audit_scanner import run_compliance_audit
+    sample_text = """1. UPTIME SLA GUARANTEE: We guarantee 99.9% availability during business hours.
+2. PENALTY CREDIT: In the event of a breach, a 15% billing penalty credit applies to the invoice."""
+    pages = extract_pages_from_text(sample_text, "test_sla.txt")
+    chunks, _ = hierarchical_chunk(pages)
+    embeddings = np.random.randn(len(chunks), 384).astype(np.float32)
+    # Unit normalize
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    retriever = HybridRetriever(chunks, embeddings)
+    
+    report = run_compliance_audit(retriever)
+    assert "overall_score" in report
+    assert "checklist" in report
+    assert len(report["checklist"]) == 7
+    assert "verdict" in report

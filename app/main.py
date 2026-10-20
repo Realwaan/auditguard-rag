@@ -20,6 +20,7 @@ from app.retriever import HybridRetriever
 from app.evaluator import evaluate_relevance
 from app.generator import generate_grounded_answer, stream_grounded_answer
 from app.llm import call_plain_gemma
+from app.audit_scanner import run_compliance_audit
 
 app = FastAPI(title="AuditGuard RAG", version="1.0.0")
 
@@ -27,9 +28,12 @@ app = FastAPI(title="AuditGuard RAG", version="1.0.0")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# In-Memory State
+# In-Memory State & Multi-Document Knowledge Vault
 ACTIVE_RETRIEVER: HybridRetriever | None = None
 ACTIVE_CHUNKS: list = []
+ACTIVE_DOC_ID: str = ""
+DOCUMENT_VAULT: dict = {}
+
 ACTIVE_CLASSIFICATION: dict = {
     "type": "NONE",
     "label": "No Document Loaded",
@@ -83,6 +87,18 @@ async def upload_document(file: UploadFile = File(...)):
     # 4. Initialize In-Memory Hybrid RRF Retriever
     ACTIVE_CHUNKS = chunks
     ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix)
+    ACTIVE_DOC_ID = doc_id
+
+    DOCUMENT_VAULT[doc_id] = {
+        "doc_id": doc_id,
+        "filename": filename,
+        "pages": len(pages),
+        "total_chunks": len(chunks),
+        "classification": classification,
+        "retriever": ACTIVE_RETRIEVER,
+        "chunks": chunks,
+        "uploaded_at": datetime.now().strftime("%H:%M:%S")
+    }
 
     # Save to disk for quick stage reloads
     try:
@@ -96,7 +112,8 @@ async def upload_document(file: UploadFile = File(...)):
         "filename": filename,
         "pages_processed": len(pages),
         "total_chunks": len(chunks),
-        "classification": ACTIVE_CLASSIFICATION
+        "classification": ACTIVE_CLASSIFICATION,
+        "doc_id": doc_id
     }
 
 class ExportReportRequest(BaseModel):
@@ -331,14 +348,74 @@ Either party may terminate this agreement without cause by providing at least 30
     child_texts = [c["child_text"] for c in chunks]
     embeddings_matrix = embed_texts(child_texts)
     ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix)
+    
+    sample_doc_id = "sample_enterprise_sop"
+    ACTIVE_DOC_ID = sample_doc_id
+    DOCUMENT_VAULT[sample_doc_id] = {
+        "doc_id": sample_doc_id,
+        "filename": "sample_enterprise_sop.txt",
+        "pages": len(pages),
+        "total_chunks": len(chunks),
+        "classification": classification,
+        "retriever": ACTIVE_RETRIEVER,
+        "chunks": chunks,
+        "uploaded_at": datetime.now().strftime("%H:%M:%S")
+    }
 
     return {
         "ok": True,
         "filename": "sample_enterprise_sop.txt",
+        "doc_id": sample_doc_id,
         "pages_processed": len(pages),
         "total_chunks": len(chunks),
         "classification": ACTIVE_CLASSIFICATION
     }
+
+@app.get("/vault")
+def get_vault():
+    """Returns all active indexed documents in the enterprise knowledge vault."""
+    items = []
+    for k, v in DOCUMENT_VAULT.items():
+        items.append({
+            "doc_id": v["doc_id"],
+            "filename": v["filename"],
+            "pages": v["pages"],
+            "total_chunks": v["total_chunks"],
+            "classification": v["classification"],
+            "uploaded_at": v["uploaded_at"],
+            "is_active": (v["doc_id"] == ACTIVE_DOC_ID)
+        })
+    return {"vault": items, "active_doc_id": ACTIVE_DOC_ID}
+
+@app.post("/vault/select/{doc_id}")
+def select_vault_document(doc_id: str):
+    """Switch active document from the vault."""
+    global ACTIVE_RETRIEVER, ACTIVE_CHUNKS, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
+    if doc_id not in DOCUMENT_VAULT:
+        raise HTTPException(status_code=404, detail="Document not found in vault.")
+    
+    doc = DOCUMENT_VAULT[doc_id]
+    ACTIVE_RETRIEVER = doc["retriever"]
+    ACTIVE_CHUNKS = doc["chunks"]
+    ACTIVE_CLASSIFICATION = doc["classification"]
+    ACTIVE_DOC_ID = doc_id
+    return {
+        "ok": True,
+        "active_doc_id": doc_id,
+        "filename": doc["filename"],
+        "classification": ACTIVE_CLASSIFICATION
+    }
+
+@app.get("/compliance-audit")
+def get_compliance_audit():
+    """Runs automated 6-point pre-flight compliance audit across the active document."""
+    if not ACTIVE_RETRIEVER:
+        raise HTTPException(status_code=400, detail="No document loaded. Please upload or load a document first.")
+    
+    report = run_compliance_audit(ACTIVE_RETRIEVER)
+    report["filename"] = DOCUMENT_VAULT.get(ACTIVE_DOC_ID, {}).get("filename", "Current Document")
+    report["classification"] = ACTIVE_CLASSIFICATION
+    return report
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
