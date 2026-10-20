@@ -89,7 +89,7 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "page": best_chunk.get("page", 1),
                 "image_url": best_chunk.get("image_url", ""),
                 "citation_id": best_chunk.get("citation_id", 1),
-                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {round(eval_res['confidence']*100, 1)}% confidence."
+                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence."
             })
         else:
             gaps_count += 1

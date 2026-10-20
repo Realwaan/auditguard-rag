@@ -217,7 +217,7 @@ async def ask_question(payload: QueryRequest):
 
     # 5. Check for Defense Refusal
     if eval_result["status"] == "REFUSE":
-        plain_baseline = call_plain_gemma(query) if payload.include_baseline else ""
+        plain_baseline = await asyncio.to_thread(call_plain_gemma, query) if payload.include_baseline else ""
         return {
             "query": query,
             "status": "REFUSE",
@@ -232,10 +232,10 @@ async def ask_question(payload: QueryRequest):
 
     # 6. Synthesize Grounded Answer with Gemma 4
     persona = ACTIVE_CLASSIFICATION.get("prompt_addon", "")
-    grounded_answer = generate_grounded_answer(query, retrieved, persona)
+    grounded_answer = await asyncio.to_thread(generate_grounded_answer, query, retrieved, persona)
 
     # 7. Baseline for Side-by-Side Comparison (Hallucination Radar)
-    plain_baseline = call_plain_gemma(query) if payload.include_baseline else ""
+    plain_baseline = await asyncio.to_thread(call_plain_gemma, query) if payload.include_baseline else ""
 
     return {
         "query": query,

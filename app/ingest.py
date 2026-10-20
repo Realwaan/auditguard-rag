@@ -29,11 +29,14 @@ def get_or_render_page_image(doc_prefix: str, page_num: int) -> Path | None:
 
     try:
         pdf = pdfium.PdfDocument(str(pdf_path))
-        if 1 <= page_num <= len(pdf):
-            page = pdf[page_num - 1]
-            image = page.render(scale=1.5).to_pil()
-            image.save(file_path, "WEBP", quality=80)
-            return file_path
+        try:
+            if 1 <= page_num <= len(pdf):
+                page = pdf[page_num - 1]
+                image = page.render(scale=1.5).to_pil()
+                image.save(file_path, "WEBP", quality=80)
+                return file_path
+        finally:
+            pdf.close()
     except Exception as e:
         print(f"Error on-demand rendering page {page_num}: {e}")
     return None
@@ -58,24 +61,27 @@ def render_page_previews(pdf_bytes: bytes, doc_prefix: str) -> Dict[int, str]:
     page_map = {}
     try:
         pdf = pdfium.PdfDocument(pdf_bytes)
-        total_pages = len(pdf)
-        
-        # If <= 10 pages, render all upfront; otherwise render first 3 and lazy-load remaining
-        pages_to_prerender = total_pages if total_pages <= 10 else 3
+        try:
+            total_pages = len(pdf)
+            
+            # If <= 10 pages, render all upfront; otherwise render first 3 and lazy-load remaining
+            pages_to_prerender = total_pages if total_pages <= 10 else 3
 
-        for idx in range(total_pages):
-            page_num = idx + 1
-            file_name = f"{doc_prefix}_page_{page_num}.webp"
-            file_path = PREVIEWS_DIR / file_name
+            for idx in range(total_pages):
+                page_num = idx + 1
+                file_name = f"{doc_prefix}_page_{page_num}.webp"
+                file_path = PREVIEWS_DIR / file_name
 
-            if idx < pages_to_prerender:
-                page = pdf[idx]
-                image = page.render(scale=1.5).to_pil()
-                image.save(file_path, "WEBP", quality=80)
-                page_map[page_num] = f"/static/previews/{file_name}"
-            else:
-                # Lazy on-demand route for 300-page scale
-                page_map[page_num] = f"/api/preview/{doc_prefix}/{page_num}"
+                if idx < pages_to_prerender:
+                    page = pdf[idx]
+                    image = page.render(scale=1.5).to_pil()
+                    image.save(file_path, "WEBP", quality=80)
+                    page_map[page_num] = f"/static/previews/{file_name}"
+                else:
+                    # Lazy on-demand route for 300-page scale
+                    page_map[page_num] = f"/api/preview/{doc_prefix}/{page_num}"
+        finally:
+            pdf.close()
     except Exception as e:
         print(f"Warning: Could not render page preview with pypdfium2: {e}")
     return page_map

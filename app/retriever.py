@@ -13,11 +13,15 @@ class HybridRetriever:
         self.embeddings = embeddings  # Shape: (N, 384), pre-normalized unit vectors
         
         # Tokenize child sentences for BM25
+        if not chunks:
+            self.bm25 = None
+            return
+
         tokenized_corpus = [c["child_text"].lower().split() for c in chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
 
     def retrieve(self, query: str, top_k: int = 4, k_rrf: int = 60) -> List[Dict[str, Any]]:
-        if not self.chunks or len(self.chunks) == 0:
+        if not self.chunks or len(self.chunks) == 0 or self.bm25 is None:
             return []
 
         # 1. Sparse BM25 Search

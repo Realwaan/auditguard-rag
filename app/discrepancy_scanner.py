@@ -172,7 +172,10 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
     aligned_count = sum(1 for f in findings if f["status"] == "ALIGN")
 
     total_pairs = len(findings)
-    consistency_score = round(((aligned_count + 0.5 * caution_count) / max(1, total_pairs)) * 100, 1)
+    if total_pairs == 0:
+        consistency_score = 100.0
+    else:
+        consistency_score = round(((aligned_count + 0.5 * caution_count) / total_pairs) * 100, 1)
 
     return {
         "doc_id": ast.doc_id,

@@ -17,8 +17,14 @@ def embed_texts(texts: List[str]) -> np.ndarray:
     Generates dense embeddings for a list of strings and normalizes to unit length (L2 norm).
     Pre-normalization allows cosine similarity to be computed via pure dot product.
     """
+    if not texts:
+        return np.zeros((0, 384), dtype=np.float32)
+
     model = get_embedding_model()
     embeddings = list(model.embed(texts))
+    if not embeddings:
+        return np.zeros((0, 384), dtype=np.float32)
+
     matrix = np.array(embeddings, dtype=np.float32)
     
     # Normalize each vector so ||v|| = 1

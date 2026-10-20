@@ -158,114 +158,117 @@ def extract_halo_crops(
         print(f"HaloCropper: Could not open PDF bytes: {e}")
         return visual_nodes
 
-    for page_idx in range(len(pdf)):
-        page_num = page_idx + 1
-        page = pdf[page_idx]
-        width_pt, height_pt = page.get_width(), page.get_height()
+    try:
+        for page_idx in range(len(pdf)):
+            page_num = page_idx + 1
+            page = pdf[page_idx]
+            width_pt, height_pt = page.get_width(), page.get_height()
 
-        # Gather candidate visual bounding boxes
-        candidate_boxes = []
-        if detected_boxes_by_page and page_num in detected_boxes_by_page:
-            candidate_boxes.extend(detected_boxes_by_page[page_num])
-        else:
-            # Automatic PDF object detection via pypdfium2
-            try:
-                for obj in page.get_objects():
-                    # PDF object type 3 corresponds to Image
-                    if getattr(obj, "type", None) == 3:
-                        bbox = obj.get_pos()  # (left, bottom, right, top) in PDF coordinates
-                        # Filter out decorative icons and tiny logos (< 40x40pt)
-                        if (bbox[2] - bbox[0] > 40) and (bbox[3] - bbox[1] > 40):
-                            candidate_boxes.append({
-                                "bbox": (bbox[0], bbox[1], bbox[2], bbox[3]),
-                                "title": f"Visual Element (Page {page_num})",
-                                "visual_type": "figure",
-                            })
-            except Exception as obj_err:
-                print(f"Object detection on page {page_num} warning: {obj_err}")
+            # Gather candidate visual bounding boxes
+            candidate_boxes = []
+            if detected_boxes_by_page and page_num in detected_boxes_by_page:
+                candidate_boxes.extend(detected_boxes_by_page[page_num])
+            else:
+                # Automatic PDF object detection via pypdfium2
+                try:
+                    for obj in page.get_objects():
+                        # PDF object type 3 corresponds to Image
+                        if getattr(obj, "type", None) == 3:
+                            bbox = obj.get_pos()  # (left, bottom, right, top) in PDF coordinates
+                            # Filter out decorative icons and tiny logos (< 40x40pt)
+                            if (bbox[2] - bbox[0] > 40) and (bbox[3] - bbox[1] > 40):
+                                candidate_boxes.append({
+                                    "bbox": (bbox[0], bbox[1], bbox[2], bbox[3]),
+                                    "title": f"Visual Element (Page {page_num})",
+                                    "visual_type": "figure",
+                                })
+                except Exception as obj_err:
+                    print(f"Object detection on page {page_num} warning: {obj_err}")
 
-        # If no image objects found, fall back to checking text for tables
-        text_page = page.get_textpage()
-        page_text = text_page.get_text_range()
+            # If no image objects found, fall back to checking text for tables
+            text_page = page.get_textpage()
+            page_text = text_page.get_text_range()
 
-        # Check for ASCII/Markdown tables
-        table_matches = re.finditer(
-            r'(?:Table\s+(\d+)[^\n]*\n)(?:\|[^\n]+\|\n)+',
-            page_text,
-            re.IGNORECASE
-        )
-        for m in table_matches:
-            tbl_title = m.group(0).splitlines()[0].strip()
-            candidate_boxes.append({
-                "bbox": (36.0, height_pt * 0.3, width_pt - 36.0, height_pt * 0.7),
-                "title": tbl_title,
-                "text": m.group(0),
-                "visual_type": "table",
-            })
-
-        # Process and crop each candidate with Halo expansion (cached page raster)
-        pil_page = None
-        for v_idx, cand in enumerate(candidate_boxes, 1):
-            vis_id = f"{doc_id}_vis_p{page_num}_{v_idx}"
-            bbox = cand.get("bbox", (50.0, 100.0, width_pt - 50.0, height_pt - 100.0))
-
-            # Sanitize coordinates: ensure x0 <= x1 and y0 <= y1
-            raw_x0, raw_y0, raw_x1, raw_y1 = bbox
-            x0 = min(raw_x0, raw_x1)
-            x1 = max(raw_x0, raw_x1)
-            y0 = min(raw_y0, raw_y1)
-            y1 = max(raw_y0, raw_y1)
-
-            w = max(1.0, x1 - x0)
-            h = max(1.0, y1 - y0)
-
-            # 12% Collision-Bounded Halo Expansion (bounded by page margins)
-            halo_x = w * 0.12
-            halo_y = h * 0.12
-            crop_x0 = max(0.0, x0 - halo_x)
-            crop_x1 = min(width_pt, x1 + halo_x)
-            crop_y0 = max(0.0, y0 - halo_y)
-            crop_y1 = min(height_pt, y1 + halo_y)
-
-            # Lazy render page once per page at 2.0x scale (144 DPI)
-            if pil_page is None:
-                scale = 2.0
-                pil_page = page.render(scale=scale).to_pil()
-            img_w, img_h = pil_page.size
-
-            # Convert PDF pt coords (origin bottom-left) to PIL image coords (origin top-left)
-            calc_x0 = int((crop_x0 / width_pt) * img_w)
-            calc_x1 = int((crop_x1 / width_pt) * img_w)
-            calc_y0 = int(((height_pt - crop_y1) / height_pt) * img_h)
-            calc_y1 = int(((height_pt - crop_y0) / height_pt) * img_h)
-
-            # Strict boundary clamp ensuring positive rectangle area
-            img_x0 = max(0, min(img_w - 2, min(calc_x0, calc_x1)))
-            img_x1 = max(img_x0 + 1, min(img_w, max(calc_x0, calc_x1)))
-            img_y0 = max(0, min(img_h - 2, min(calc_y0, calc_y1)))
-            img_y1 = max(img_y0 + 1, min(img_h, max(calc_y0, calc_y1)))
-
-            cropped_img = pil_page.crop((img_x0, img_y0, img_x1, img_y1))
-            crop_file_name = f"{vis_id}.webp"
-            crop_path = CROPS_DIR / crop_file_name
-            cropped_img.save(crop_path, "WEBP", quality=85)
-
-            v_title = cand.get("title") or f"Visual P{page_num} #{v_idx}"
-            v_text = cand.get("text") or f"Visual crop: {v_title}"
-
-            node = ASTNode(
-                id=vis_id,
-                type=ASTNodeType.VISUAL,
-                title=v_title,
-                text=v_text,
-                page=page_num,
-                materialized_path=f"root/visuals/{vis_id}",
-                bbox=(crop_x0, crop_y0, crop_x1, crop_y1),
-                image_url=f"/static/crops/{crop_file_name}",
-                visual_type=cand.get("visual_type", "figure"),
-                confidence=0.95,
+            # Check for ASCII/Markdown tables
+            table_matches = re.finditer(
+                r'(?:Table\s+(\d+)[^\n]*\n)(?:\|[^\n]+\|\n)+',
+                page_text,
+                re.IGNORECASE
             )
-            visual_nodes.append(node)
+            for m in table_matches:
+                tbl_title = m.group(0).splitlines()[0].strip()
+                candidate_boxes.append({
+                    "bbox": (36.0, height_pt * 0.3, width_pt - 36.0, height_pt * 0.7),
+                    "title": tbl_title,
+                    "text": m.group(0),
+                    "visual_type": "table",
+                })
+
+            # Process and crop each candidate with Halo expansion (cached page raster)
+            pil_page = None
+            for v_idx, cand in enumerate(candidate_boxes, 1):
+                vis_id = f"{doc_id}_vis_p{page_num}_{v_idx}"
+                bbox = cand.get("bbox", (50.0, 100.0, width_pt - 50.0, height_pt - 100.0))
+
+                # Sanitize coordinates: ensure x0 <= x1 and y0 <= y1
+                raw_x0, raw_y0, raw_x1, raw_y1 = bbox
+                x0 = min(raw_x0, raw_x1)
+                x1 = max(raw_x0, raw_x1)
+                y0 = min(raw_y0, raw_y1)
+                y1 = max(raw_y0, raw_y1)
+
+                w = max(1.0, x1 - x0)
+                h = max(1.0, y1 - y0)
+
+                # 12% Collision-Bounded Halo Expansion (bounded by page margins)
+                halo_x = w * 0.12
+                halo_y = h * 0.12
+                crop_x0 = max(0.0, x0 - halo_x)
+                crop_x1 = min(width_pt, x1 + halo_x)
+                crop_y0 = max(0.0, y0 - halo_y)
+                crop_y1 = min(height_pt, y1 + halo_y)
+
+                # Lazy render page once per page at 2.0x scale (144 DPI)
+                if pil_page is None:
+                    scale = 2.0
+                    pil_page = page.render(scale=scale).to_pil()
+                img_w, img_h = pil_page.size
+
+                # Convert PDF pt coords (origin bottom-left) to PIL image coords (origin top-left)
+                calc_x0 = int((crop_x0 / width_pt) * img_w)
+                calc_x1 = int((crop_x1 / width_pt) * img_w)
+                calc_y0 = int(((height_pt - crop_y1) / height_pt) * img_h)
+                calc_y1 = int(((height_pt - crop_y0) / height_pt) * img_h)
+
+                # Strict boundary clamp ensuring positive rectangle area
+                img_x0 = max(0, min(img_w - 2, min(calc_x0, calc_x1)))
+                img_x1 = max(img_x0 + 1, min(img_w, max(calc_x0, calc_x1)))
+                img_y0 = max(0, min(img_h - 2, min(calc_y0, calc_y1)))
+                img_y1 = max(img_y0 + 1, min(img_h, max(calc_y0, calc_y1)))
+
+                cropped_img = pil_page.crop((img_x0, img_y0, img_x1, img_y1))
+                crop_file_name = f"{vis_id}.webp"
+                crop_path = CROPS_DIR / crop_file_name
+                cropped_img.save(crop_path, "WEBP", quality=85)
+
+                v_title = cand.get("title") or f"Visual P{page_num} #{v_idx}"
+                v_text = cand.get("text") or f"Visual crop: {v_title}"
+
+                node = ASTNode(
+                    id=vis_id,
+                    type=ASTNodeType.VISUAL,
+                    title=v_title,
+                    text=v_text,
+                    page=page_num,
+                    materialized_path=f"root/visuals/{vis_id}",
+                    bbox=(crop_x0, crop_y0, crop_x1, crop_y1),
+                    image_url=f"/static/crops/{crop_file_name}",
+                    visual_type=cand.get("visual_type", "figure"),
+                    confidence=0.95,
+                )
+                visual_nodes.append(node)
+    finally:
+        pdf.close()
 
     return visual_nodes
 
