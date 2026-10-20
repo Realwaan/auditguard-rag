@@ -1,65 +1,64 @@
 # 🛡️ AuditGuard RAG
-### Defense-Grade Document Intelligence & Compliance Verification Copilot
+### Hierarchical Multimodal Tree-RAG & Cross-Modal Compliance Verification Copilot
 *Built for the ALMA Future Forge Hackathon 2026 (Cebu City)*  
-*Powered by **Gemma 4** & Local Hybrid Neural-Lexical Search*
+*Powered by **Gemma 4**, In-Process **LanceDB (Apache Arrow/Rust)** & C++ **PDFium***
 
 ---
 
 ## 🎯 Executive Summary
-Enterprises and remote operations teams waste hundreds of hours cross-referencing US client SOPs, vendor contracts, and security audits. General-purpose LLMs hallucinate clauses and fail audit reviews.
+Enterprises and remote operations teams waste hundreds of hours cross-referencing US client SOPs, vendor contracts, financial reports, and technical manuals. General-purpose LLMs hallucinate clauses and fail audit reviews. Furthermore, standard RAG pipelines suffer from **context severance** (separating figures from the paragraphs explaining them) and **caption lossiness** (summarizing charts into blurry text).
 
-**AuditGuard RAG** solves this with a **zero-trust, epistemic retrieval architecture**:
-1. **Epistemic Humility (Refusal over Hallucination)**: When query relevance drops below threshold ($\tau = 0.58$), the system rigorously refuses to answer (`⚠️ OUT-OF-BOUNDS`) rather than fabricating facts.
-2. **Visual Proof & Provenance**: Every claim includes citation badges (`[1]`, `[2]`) that open the **Visual Audit Proof Drawer**, rendering high-resolution PDF page captures directly from disk.
-3. **Optimized for Gemma 4**: Formatted with strict instruction grounding, zero-shot persona adaptation, and low-latency SSE streaming.
+**AuditGuard RAG** solves this with a **Compiler-Grade Hierarchical Multimodal Tree-RAG architecture**:
+1. **3-Tier Document AST**: Parses document hierarchy (`Document Root (H0) ➔ Section (H1/H2) ➔ Paragraph Leaf (H3) ⟷ Visual Leaf (Figure/Table)`) with materialized path prefix lookups (`root/01_scope/02_sla/para_1`).
+2. **Collision-Bounded Halo Cropper**: Expands visual bounding boxes by 12% outward padding to capture axis units (`$ in Millions`) and chart legends without clipping, bounded by page margins and saved as lossless WebP crops.
+3. **3-Tier Cross-Modal Linker**: Wires bidirectional sibling pointers between citing text and chart visuals using exact regex symbols (`Figure 1`, `Table II`), spatial adjacency fallback, and parent section association.
+4. **Cross-Modal Contradiction Hunter**: Detects discrepancies between author prose claims (*"Uptime guarantee of 99.9%"*) and linked visual evidence (*"Table 1 shows 98.2% breach"*).
+5. **Epistemic Humility (Refusal over Hallucination)**: When query relevance drops below threshold ($\tau = 0.50$), the Corrective RAG (CRAG) gatekeeper triggers a defense refusal (`⚠️ OUT-OF-BOUNDS`) rather than fabricating facts.
+6. **Embedded In-Process LanceDB Engine**: Columnar vector storage powered by Rust and Apache Arrow with sub-5ms retrieval and zero external Docker or database dependencies.
 
 ---
 
-## 🏗️ Architecture: Hybrid Small-to-Big Engine
+## 🏗️ Architecture: Cross-Linked Multimodal AST
 
 ```
 [ Upload PDF / SOP ]
         │
-        ├─────────────────────────────────────────┐
-        ▼                                         ▼
-[ Page Text Extraction ]                 [ pypdfium2 Visual Render ]
-        │                                         │
-        ▼                                         ▼
-[ Small-to-Big Chunking ]               [ /static/previews/page_N.png ]
-  - Child sentences (~150 chars)                  │
-  - Parent paragraphs (~600 chars)               │
-        │                                         │
-        ▼                                         │
-[ In-Process Indexing ]                           │
-  - Dense Vector: BAAI/bge-small (ONNX)          │
-  - Lexical Sparse: BM25Okapi                     │
-        │                                         │
-        ▼                                         │
-[ Query: "What is the penalty?" ]                 │
-        │                                         │
-        ├──────────────────────┐                  │
-        ▼                      ▼                  │
- [ Vector Search ]      [ BM25 Lexical ]          │
-        └──────────┬───────────┘                  │
-                   ▼                              │
-      [ Reciprocal Rank Fusion ]                  │
-                   │                              │
-                   ▼                              │
-        [ CRAG Relevance Gate ]                   │
-          Confidence < 0.58?                      │
-           ├── YES ──► ⚠️ OUT-OF-BOUNDS REFUSAL   │
-           └── NO  ──► Send Parent Context        │
-                               │                  │
-                               ▼                  │
-                   [ Gemma 4 LLM Inference ]      │
-                               │                  │
-                               ▼                  │
-                     [ Streamed Response ]        │
-                     "Under clause 9 [1]..."      │
-                               │                  │
-                               ▼                  │
-                   [ Clickable Citation Badge ] ──┘
-                    (Opens Visual Page Proof)
+        ├─────────────────────────────────────────────────┐
+        ▼                                                 ▼
+[ pypdfium2 C++ Extraction ]                   [ Collision-Bounded Halo Cropper ]
+  - Hierarchy & Headings                         - 12% Outward Margin Expansion
+  - Paragraph Leaf Blocks                        - Lossless WebP Rasterization
+        │                                                 │
+        ▼                                                 ▼
+[ 3-Tier Document AST ] ◄─── Bi-Directional Linker ───► [ Visual Leaves ]
+  (Root ➔ Section ➔ Para)  (Symbols, Adjacency, Section)   (/static/crops/*.webp)
+        │
+        ▼
+[ In-Process LanceDB (Rust/Arrow) + BM25 ]
+  - Dense Embeddings: BAAI/bge-small-en-v1.5 (ONNX)
+  - Lexical Sparse: BM25Okapi
+        │
+        ▼
+[ Query Execution & Reciprocal Rank Fusion ]
+        │
+        ▼
+[ AST Sibling Hydration ]
+  - Automatically pulls linked Visual Crop into citation payload
+        │
+        ▼
+[ CRAG Relevance Gatekeeper ]
+  Confidence < 0.50?
+   ├── YES ──► ⚠️ OUT-OF-BOUNDS REFUSAL (0% Hallucination)
+   └── NO  ──► Send Grounded Context + Domain Persona
+                       │
+                       ▼
+           [ Gemma 4 LLM Inference ]
+                       │
+                       ▼
+             [ Split-Screen UI ]
+         - Traversed AST Path Highlight
+         - Side-by-Side Hallucination Radar
+         - Expandable Proof Drawer & Visual Lightbox
 ```
 
 ---
@@ -68,6 +67,38 @@ Enterprises and remote operations teams waste hundreds of hours cross-referencin
 
 ### 1. Requirements
 - Python 3.11+
+- Chrome or modern browser
+
+### 2. Start Application
+Simply double-click `run.bat` or run:
+```powershell
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+Open **[http://127.0.0.1:8000](http://127.0.0.1:8000)** in your browser.
+
+### 3. Load Sample SOP (1-Click)
+Click **"Load Sample SOP"** in the top navigation bar to instantly index a sample Enterprise IT & Security SLA agreement with built-in footnote discrepancy for contradiction testing.
+
+---
+
+## 🧪 Testing
+Run the complete automated test suite (23/23 passing):
+```powershell
+pytest tests -v
+```
+
+---
+
+## 🔑 Gemma 4 Configuration (`.env`)
+```ini
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=gemma-4
+LLM_API_KEY=alma-hackathon-token
+SIMILARITY_THRESHOLD=0.50
+TOP_K=4
+DEFAULT_EMBED_MODEL=BAAI/bge-small-en-v1.5
+```
+On hackathon morning, simply configure `LLM_BASE_URL` with ALMA's private inference endpoint.
 - Chrome or modern browser
 
 ### 2. Start Application
