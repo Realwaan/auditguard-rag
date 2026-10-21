@@ -13,3 +13,5 @@ app/static/previews/*
 app/static/crops/*
 !app/static/crops/.gitkeep
 .pytest_cache/
+*.patch
+

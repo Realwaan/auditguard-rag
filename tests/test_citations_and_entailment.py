@@ -112,3 +112,112 @@ def test_evaluator_honest_claim_evidence_signals():
     assert ref_res["claim_evidence_verified"] is False
     assert "NEUTRAL" in ref_res["nli_verdict"]
 
+
+
+def test_citation_verification_detects_unit_mismatch_days_vs_hours():
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": "Support response time is 8 days under standard SLA tier.",
+        "child_text": "Support response time is 8 days"
+    }]
+    answer = "Support response time is 8 hours [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is False
+    assert audit["verdict"] == "UNSUPPORTED_CLAIM"
+    assert audit["unsupported_count"] >= 1
+    assert "unit" in audit["verified_citations"][0]["reason"].lower()
+
+
+def test_citation_verification_detects_written_number_mismatch_fifty_vs_fifteen():
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": "Penalty credit is fifty percent for complete outages.",
+        "child_text": "Penalty credit is fifty percent"
+    }]
+    answer = "Penalty credit is fifteen percent [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is False
+    assert audit["verdict"] == "UNSUPPORTED_CLAIM"
+    assert audit["unsupported_count"] >= 1
+
+
+def test_citation_verification_accepts_normalized_written_numbers():
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": "Penalty credit is fifty percent for complete outages.",
+        "child_text": "Penalty credit is fifty percent"
+    }]
+    answer = "Penalty credit is 50% [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is True
+    assert audit["verdict"] == "VERIFIED"
+
+
+def test_citation_verification_flags_uncited_preceding_sentence():
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": "Backups are retained for 30 days in off-site encrypted storage.",
+        "child_text": "Backups are retained for 30 days"
+    }]
+    answer = "Data is encrypted at rest using AES-256. Backups are retained for 30 days [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is False
+    assert audit["verdict"] == "UNSUPPORTED_CLAIM"
+    assert any(c["citation_id"] is None for c in audit["verified_citations"])
+
+
+def test_evaluator_rejects_structural_section_number_for_duration_query():
+    chunks = [{
+        "parent_text": "Section 2 discusses annual leave eligibility. All employees in good standing are entitled to leave as approved by HR.",
+        "child_text": "Section 2 discusses annual leave eligibility",
+        "dense_score": 0.70
+    }]
+    query = "How many days of annual leave are allowed?"
+    res = evaluate_relevance(chunks, query=query)
+    assert res["status"] == "REFUSE"
+    assert "NEUTRAL" in res["nli_verdict"]
+    assert "quantitative metric" in res["reason"].lower()
+
+
+def test_evaluator_accepts_valid_duration_quantity():
+    chunks = [{
+        "parent_text": "Section 2: Full-time employees are entitled to 25 days of annual leave per calendar year.",
+        "child_text": "25 days of annual leave per calendar year",
+        "dense_score": 0.85
+    }]
+    query = "How many days of annual leave are allowed?"
+    res = evaluate_relevance(chunks, query=query)
+    assert res["status"] == "SYNTHESIZE"
+    assert res["nli_verdict"] == "ENTAILED"
+
+
+def test_evaluator_conceptual_question_not_blocked_by_numerical_check():
+    chunks = [{
+        "parent_text": "A Service Level Agreement (SLA) is a documented commitment between a service provider and a client specifying service standards.",
+        "child_text": "Service Level Agreement (SLA) is a documented commitment",
+        "dense_score": 0.82
+    }]
+    query = "What is an SLA?"
+    res = evaluate_relevance(chunks, query=query)
+    assert res["status"] == "SYNTHESIZE"
+    assert res["nli_verdict"] == "ENTAILED"
+
+
+def test_evaluator_financial_cap_detection():
+    chunks_no_cap = [{
+        "parent_text": "Section 5 discusses dispute arbitration and governing law in the State of Delaware.",
+        "child_text": "Section 5 discusses dispute arbitration",
+        "dense_score": 0.65
+    }]
+    query = "What is the maximum liability cap?"
+    res_no = evaluate_relevance(chunks_no_cap, query=query)
+    assert res_no["status"] == "REFUSE"
+
+    chunks_with_cap = [{
+        "parent_text": "Section 5: The aggregate liability cap shall not exceed $1,000,000 for any single claim.",
+        "child_text": "aggregate liability cap shall not exceed $1,000,000",
+        "dense_score": 0.85
+    }]
+    res_with = evaluate_relevance(chunks_with_cap, query=query)
+    assert res_with["status"] == "SYNTHESIZE"
+    assert res_with["nli_verdict"] == "ENTAILED"

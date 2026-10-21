@@ -30,6 +30,47 @@ NUMBER_WORDS = {
     "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
     "hundred", "thousand", "million", "billion", "percent", "percentage"
 }
+ONES = {
+    'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+    'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+    'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13,
+    'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17,
+    'eighteen': 18, 'nineteen': 19
+}
+TENS = {
+    'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+    'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90
+}
+SCALES = {
+    'hundred': 100, 'thousand': 1000, 'million': 1000000, 'billion': 1000000000
+}
+ALL_NUM_WORDS = sorted(list(set(ONES.keys()) | set(TENS.keys()) | set(SCALES.keys())), key=len, reverse=True)
+
+def normalize_written_numbers(text: str) -> str:
+    """Replaces written-out English numbers (e.g. 'fifty', 'twenty-five', 'two hours') with digit equivalents."""
+    if not text:
+        return ""
+    pattern_hyphen = r'\b(' + '|'.join(ALL_NUM_WORDS) + r')\s*-\s*(' + '|'.join(ALL_NUM_WORDS) + r')\b'
+    text = re.sub(pattern_hyphen, r'\1 \2', text, flags=re.IGNORECASE)
+    pattern = r'\b(?:' + '|'.join(ALL_NUM_WORDS) + r')\b(?:\s+(?:and\s+)?(?:' + '|'.join(ALL_NUM_WORDS) + r')\b)*'
+    def repl(m):
+        words = [w.lower() for w in re.findall(r'\b[a-zA-Z]+\b', m.group(0)) if w.lower() in ALL_NUM_WORDS]
+        if not words:
+            return m.group(0)
+        total, current = 0, 0
+        for tok in words:
+            if tok in ONES:
+                current += ONES[tok]
+            elif tok in TENS:
+                current += TENS[tok]
+            elif tok == 'hundred':
+                current = (current if current else 1) * 100
+            elif tok in ('thousand', 'million', 'billion'):
+                current = (current if current else 1) * SCALES[tok]
+                total += current
+                current = 0
+        return str(total + current)
+    return re.sub(pattern, repl, text, flags=re.IGNORECASE)
 
 NEGATION_WORDS = {
     "no", "not", "never", "none", "neither", "nor", "prohibited", "banned",
@@ -91,19 +132,59 @@ def evaluate_heuristic_entailment(
     q_lower = query.lower()
 
     # 1. Quantitative vs Descriptive Answer Target Check
-    # Match requested quantities, not substrings such as "rate" in "corporate",
-    # nor descriptive questions such as "What is an SLA?".
-    is_quantitative = bool(re.search(
-        r'\b(?:percentage|percent|how much|how many|how long|amount|threshold)\b', q_lower
-    ))
-    ctx_numbers = re.findall(r'\b\d+(?:\.\d+)?%?\b', ctx_lower)
-    ctx_word_numbers = [w for w in NUMBER_WORDS if re.search(r'\b' + re.escape(w) + r'\b', ctx_lower)]
-    has_numerical_target = bool(ctx_numbers) or bool(ctx_word_numbers)
-    if re.search(r'\b(?:percentage|percent)\b', q_lower):
-        number_names = "|".join(sorted(NUMBER_WORDS - {"percent", "percentage"}))
-        has_numerical_target = bool(re.search(
-            rf'(?:\d+(?:\.\d+)?|\b(?:{number_names}))\s*(?:%|percent\b)', ctx_lower
+    # Identify conceptual / definitional questions (e.g. "What is an SLA?", "Define availability")
+    # which seek conceptual explanations rather than quantitative metrics.
+    is_conceptual = bool(re.search(
+        r'^(?:what\s+is\s+(?:an?|the\s+concept\s+of)\b|define\b|meaning\s+of\b|explain\s+(?:what\s+is\s+)?(?:an?|the\s+concept\s+of)\b)',
+        q_lower.strip()
+    )) and not bool(re.search(r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|exact|figure|number|rate\s+of|limit\s+of|cap\s+of)\b', q_lower))
+
+    # Strip structural document references (e.g. "Section 2", "Clause 4.1", "Table 1", "Page 3")
+    # so section or page identifiers are never confused with substantive quantitative targets.
+    substantive_ctx = re.sub(
+        r'\b(?:section|clause|table|figure|fig\.?|page|p\.?|pp\.?|article|paragraph|para\.?|item|step|appendix|exhibit|rule)\s+\d+(?:[\.\-]\d+)*\b',
+        '', ctx_lower
+    )
+    substantive_ctx = re.sub(r'\b(?:v|ver|version)\s*\d+(?:\.\d+)*\b', '', substantive_ctx)
+    substantive_ctx = normalize_written_numbers(substantive_ctx)
+
+    is_quantitative = False
+    has_numerical_target = True
+
+    if not is_conceptual:
+        # Check for quantitative indicators:
+        # - Direct quantity queries (how much, how many, how long, amount, percentage, threshold)
+        # - Financial & metric terms (fee, cost, cap, dollar, penalty, credit, uptime, availability, etc.)
+        has_qty_question = bool(re.search(
+            r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|threshold)\b', q_lower
         ))
+        has_qty_terms = bool(re.search(
+            r'\b(?:fee|fees|cost|costs|cap|dollar|dollars|\$|penalty|credit|uptime|availability|deductible|liability|allowance|quota)\b', q_lower
+        ))
+
+        if has_qty_question or has_qty_terms:
+            is_quantitative = True
+            # Verify that context contains numbers associated with the requested quantity type
+            if re.search(r'\b(?:how\s+many\s+days|days\s+of|number\s+of\s+days|leave\s+days|notice\s+period)\b', q_lower):
+                has_numerical_target = bool(re.search(
+                    r'\b\d+(?:\.\d+)?\s*(?:business\s+days?|calendar\s+days?|working\s+days?|days?)\b', substantive_ctx
+                ))
+            elif re.search(r'\b(?:how\s+many\s+hours|hours\s+of|response\s+time)\b', q_lower):
+                has_numerical_target = bool(re.search(
+                    r'\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?)\b', substantive_ctx
+                ))
+            elif re.search(r'\b(?:how\s+long)\b', q_lower):
+                has_numerical_target = bool(re.search(
+                    r'\b\d+(?:\.\d+)?\s*(?:business\s+days?|calendar\s+days?|days?|hours?|hrs?|minutes?|weeks?|months?|years?)\b', substantive_ctx
+                ))
+            elif re.search(r'\b(?:percentage|percent|uptime|availability)\b', q_lower):
+                has_numerical_target = bool(re.search(r'\b\d+(?:\.\d+)?\s*(?:%|percent\b)', substantive_ctx))
+            elif re.search(r'\b(?:fee|cost|price|dollar|dollars|\$|threshold|deductible|liability|cap|penalty|credit)\b', q_lower):
+                has_numerical_target = bool(re.search(
+                    r'(?:[$€£]\s*\d+|\b\d+(?:\.\d+)?\s*(?:dollars?|cents?|usd|eur|euros?|gbp|pounds?|%|percent)\b)', substantive_ctx
+                )) or bool(re.findall(r'\b\d+(?:\.\d+)?%?\b', substantive_ctx))
+            else:
+                has_numerical_target = bool(re.findall(r'\b\d+(?:\.\d+)?%?\b', substantive_ctx))
 
     if is_quantitative and not has_numerical_target:
         # Context is on-topic but lacks the actual numerical figure requested

@@ -53,16 +53,39 @@ def test_whitespace_and_oversize_upload_do_not_replace_document(client, monkeypa
 
 
 def test_failed_indexing_preserves_active_document(client, monkeypatch):
-    original_classification = main.ACTIVE_CLASSIFICATION
+    # 1. Load a valid document first and record state
+    upload1 = client.post("/upload", files={"file": ("initial.txt", b"Initial document content. Support response time is 4 hours.")})
+    assert upload1.status_code == 200
+    initial_doc_id = main.ACTIVE_DOC_ID
+    assert initial_doc_id != ""
+    initial_vault = dict(main.DOCUMENT_VAULT)
+    initial_asts = dict(main.DOCUMENT_ASTS)
+    initial_classification = main.ACTIVE_CLASSIFICATION
+    initial_retriever = main.ACTIVE_RETRIEVER
+
+    # Verify initial document is queryable
+    q1 = client.post("/ask", json={"query": "What is support response time?", "include_baseline": False})
+    assert q1.status_code == 200
+
+    # 2. Simulate failed upload on a subsequent document
+    original_embed = main.embed_texts
     def fail(_):
         raise RuntimeError("Embedding failure")
     monkeypatch.setattr(main, "embed_texts", fail)
-    result = client.post("/upload", files={"file": ("new.txt", b"Contract uptime is 99.9 percent.")})
+    result = client.post("/upload", files={"file": ("corrupt.txt", b"New content that fails during indexing.")})
     assert result.status_code == 503
-    assert main.DOCUMENT_ASTS == {}
-    assert main.DOCUMENT_VAULT == {}
-    assert main.ACTIVE_CLASSIFICATION is original_classification
-    assert main.ACTIVE_DOC_ID == ""
+
+    # 3. Assert active document and state remain unchanged
+    assert main.ACTIVE_DOC_ID == initial_doc_id
+    assert main.DOCUMENT_VAULT == initial_vault
+    assert main.DOCUMENT_ASTS == initial_asts
+    assert main.ACTIVE_CLASSIFICATION is initial_classification
+    assert main.ACTIVE_RETRIEVER is initial_retriever
+
+    # 4. Verify initial document remains queryable after the failed upload attempt
+    monkeypatch.setattr(main, "embed_texts", original_embed)
+    q2 = client.post("/ask", json={"query": "What is support response time?", "include_baseline": False})
+    assert q2.status_code == 200
 
 
 @pytest.mark.parametrize("answer,expected", [
@@ -109,6 +132,17 @@ def test_alma_model_and_explicit_override(monkeypatch):
     llm.call_plain_gemma("What is uptime?", "selected-model")
     assert seen == ["venue-model-id", "selected-model"]
     assert llm.get_default_model() == "venue-model-id"
+
+    # Verify streaming also defaults to provider-aware default model
+    seen_stream = []
+    def create_stream(**kwargs):
+        seen_stream.append(kwargs["model"])
+        return iter([SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Uptime is 99.9% [1]."))])])
+    provider_stream = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_stream)))
+    monkeypatch.setattr(generator, "get_openai_client", lambda: provider_stream)
+    list(generator.stream_grounded_answer("What is uptime?", [evidence("Uptime is 99.9%.")]))
+    list(generator.stream_grounded_answer("What is uptime?", [evidence("Uptime is 99.9%.")], model_override="custom-stream-model"))
+    assert seen_stream == ["venue-model-id", "custom-stream-model"]
 
 
 def test_partial_stream_never_appends_a_second_provider_answer(monkeypatch):

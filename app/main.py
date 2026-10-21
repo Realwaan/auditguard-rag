@@ -260,7 +260,19 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Could not parse this document. Check that the file is valid and not encrypted.") from exc
 
     if not pages or not any(p.get("text", "").strip() for p in pages):
-        raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
+        if is_pdf and page_images:
+            pages = [
+                {
+                    "filename": filename,
+                    "page": page_num,
+                    "text": f"Page {page_num} (Visual / Scanned Content)",
+                    "is_scanned": True,
+                    "is_ocr": False,
+                }
+                for page_num in sorted(page_images.keys())
+            ]
+        else:
+            raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
 
     try:
         return await _ingest_document_into_vault(
@@ -638,7 +650,7 @@ async def ask_stream(
         return StreamingResponse(refuse_generator(), media_type="text/plain")
 
     persona = classification.get("prompt_addon", "")
-    model_choice = model
+    model_choice = model or get_default_model()
     return StreamingResponse(
         iterate_in_threadpool(stream_grounded_answer(clean_query, retrieved, persona, model_choice)),
         media_type="text/plain"

@@ -1,11 +1,11 @@
 import re
 from typing import List, Dict, Any, Generator, Optional, Tuple
 from app.llm import (
-    get_openai_client, get_genai_client,
+    get_openai_client, get_genai_client, get_default_model,
     load_image_bytes, make_genai_part, make_openai_image_part
 )
 from app.config import LLM_MODEL, USE_GOOGLE_GENAI, get_gemma_model
-from app.evaluator import keyword_present, verify_generated_answer
+from app.evaluator import keyword_present, verify_generated_answer, normalize_written_numbers, STOP_WORDS
 
 REFUSAL_TEXT = "I cannot verify this information in the provided document excerpts."
 
@@ -118,6 +118,77 @@ def sanitize_citations(text: str, max_chunk: int) -> str:
         return m.group(0)
     return re.sub(r'\[(\d+)\]', _replace, text).strip()
 
+UNIT_MAPPINGS = [
+    (r'\b(?:business\s+days?|working\s+days?)\b', 'business_day'),
+    (r'\b(?:calendar\s+days?)\b', 'calendar_day'),
+    (r'\b(?:days?|d)\b', 'day'),
+    (r'\b(?:hours?|hrs?|hr|h)\b', 'hour'),
+    (r'\b(?:minutes?|mins?|min|m)\b', 'minute'),
+    (r'\b(?:seconds?|secs?|sec|s)\b', 'second'),
+    (r'\b(?:weeks?|wks?|wk|w)\b', 'week'),
+    (r'\b(?:months?|mos?|mo)\b', 'month'),
+    (r'\b(?:years?|yrs?|yr|y)\b', 'year'),
+    (r'(?:%|\b(?:percent(?:age)?|pct)\b)', 'percent'),
+    (r'(?:\$|\b(?:usd|dollars?|cents?)\b)', 'dollar'),
+    (r'(?:€|\b(?:eur|euros?)\b)', 'euro'),
+    (r'(?:£|\b(?:gbp|pounds?)\b)', 'pound'),
+    (r'\b(?:bytes?|b)\b', 'byte'),
+    (r'\b(?:kb|kilobytes?)\b', 'kb'),
+    (r'\b(?:mb|megabytes?)\b', 'mb'),
+    (r'\b(?:gb|gigabytes?)\b', 'gb'),
+    (r'\b(?:tb|terabytes?)\b', 'tb'),
+]
+
+def resolve_unit(token: str) -> Optional[str]:
+    t = token.lower().strip()
+    for pattern, canonical in UNIT_MAPPINGS:
+        if re.search(pattern, t):
+            return canonical
+    return None
+
+def extract_quantities(text: str) -> List[Tuple[float, Optional[str]]]:
+    """Extracts numbers and their canonical units, ignoring citation badges [1], [2]."""
+    text_clean = re.sub(r'\[\s*\d+\s*\]', '', text)
+    normalized = normalize_written_numbers(text_clean).lower()
+    pattern = r'([$€£])?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\b[a-zA-Z_]+(?:\s+[a-zA-Z_]+)?\b)?'
+    results = []
+    for m in re.finditer(pattern, normalized):
+        curr_prefix, num_str, unit_str = m.groups()
+        try:
+            val = float(num_str.replace(',', ''))
+        except ValueError:
+            continue
+        unit = None
+        if curr_prefix:
+            if curr_prefix == '$': unit = 'dollar'
+            elif curr_prefix == '€': unit = 'euro'
+            elif curr_prefix == '£': unit = 'pound'
+        elif unit_str:
+            unit = resolve_unit(unit_str)
+        results.append((val, unit))
+    return results
+
+def check_quantity_support(claim_text: str, chunk_text: str) -> Tuple[bool, Optional[str]]:
+    """Checks that numbers and their units in claim_text are supported by chunk_text."""
+    claim_q = extract_quantities(claim_text)
+    if not claim_q:
+        return True, None
+    chunk_q = extract_quantities(chunk_text)
+    chunk_vals = {v for (v, u) in chunk_q}
+    
+    for c_val, c_unit in claim_q:
+        if (c_val, c_unit) in chunk_q:
+            continue
+        conflicts = [u for (v, u) in chunk_q if v == c_val and u != c_unit and u is not None and c_unit is not None]
+        if conflicts:
+            return False, f"Unit mismatch: claim states {c_val} {c_unit}, but cited chunk states {c_val} {conflicts[0]}"
+        if c_val not in chunk_vals:
+            return False, f"Numerical discrepancy: value {c_val} not found in cited chunk"
+        if c_unit is not None and not any(v == c_val and (u == c_unit or u is None) for (v, u) in chunk_q):
+            return False, f"Unit mismatch: claim states {c_val} {c_unit}, not supported in cited chunk"
+
+    return True, None
+
 def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Rigorously verifies that claims citing [1], [2], etc. are genuinely supported by their referenced chunks.
@@ -187,15 +258,40 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
         start_idx = match.start()
         end_idx = match.end()
 
-        # The clause belongs from the previous boundary (previous citation, or start of sentence)
+        # Segment between previous boundary and current citation
         clause_raw = answer[prev_end:start_idx].strip()
-        # Keep decimal values and sentences with citations after their period intact.
-        claim_clause = clause_raw.strip(" \n\r.,;:!?")
+        
+        # Split into distinct sentences to associate citations specifically with individual claims
+        # and prevent paragraph-trailing citations from swallowing preceding uncited factual assertions.
+        raw_sentences = re.split(r'(?<=[a-zA-Z0-9][.!?])\s+(?=[A-Z0-9])|\n+', clause_raw)
+        cleaned_sentences = [s.strip() for s in raw_sentences if s.strip()]
+
+        if len(cleaned_sentences) > 1:
+            # Check preceding sentences for uncited factual assertions
+            for prec_sent in cleaned_sentences[:-1]:
+                prec_words = [t for t in re.findall(r'\b[a-zA-Z0-9_\-]{3,}\b', prec_sent.lower()) 
+                              if t not in STOP_WORDS and t not in {"overview", "details", "findings", "summary", "notes", "below", "following"}]
+                has_numbers = bool(re.search(r'\d', prec_sent))
+                if len(prec_words) >= 3 or has_numbers:
+                    unsupported_count += 1
+                    has_unsupported_claim = True
+                    verified_list.append({
+                        "citation_id": None,
+                        "supported": False,
+                        "claim_excerpt": prec_sent[:100],
+                        "reason": "Preceding factual assertion lacks required citation badge"
+                    })
+            claim_clause = cleaned_sentences[-1]
+        elif cleaned_sentences:
+            claim_clause = cleaned_sentences[0]
+        else:
+            claim_clause = ""
+
+        claim_clause = claim_clause.strip(" \n\r.,;:!?")
         if not claim_clause:
             claim_clause = previous_claim  # adjacent citations support the same claim
         else:
             previous_claim = claim_clause
-        # Clean leading conjunctions/punctuation
         claim_clause = re.sub(r'^[,\s]*(?:and|or|but|also|furthermore)?\s*', '', claim_clause, flags=re.IGNORECASE)
         prev_end = end_idx
 
@@ -214,12 +310,9 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
         chunk_text = (target_chunk.get("parent_text", "") + " " + target_chunk.get("child_text", "")).lower()
         claim_text = claim_clause.lower()
 
-        # 1. Number / Percentage consistency check for this specific clause
-        def numbers(text):
-            # Exact values and units: 4 != 8; 15% != 115% or 15 dollars.
-            pattern = r'(?<![\w.])(?:[$€£]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|percent\b))?'
-            return {re.sub(r'\s+|,', '', n).replace("percent", "%") for n in re.findall(pattern, text)}
-        number_mismatch = not numbers(claim_text).issubset(numbers(chunk_text))
+        # 1. Rigorous quantity & unit verification (handles written numbers, units, currency)
+        is_qty_supported, qty_mismatch_reason = check_quantity_support(claim_clause, chunk_text)
+        number_mismatch = not is_qty_supported
 
         # 2. Key content keyword overlap for this clause
         claim_tokens = [
@@ -247,7 +340,7 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
             "number_verified": not number_mismatch,
             "claim_excerpt": claim_clause[:100],
             "reason": "Supported by evidentiary excerpt" if is_supported else (
-                "Numerical discrepancy between clause and cited chunk" if number_mismatch 
+                (qty_mismatch_reason or "Numerical discrepancy between clause and cited chunk") if number_mismatch 
                 else "Insufficient textual support in cited excerpt"
             )
         })
@@ -334,9 +427,9 @@ def generate_grounded_answer(
                 )
                 if response and response.text:
                     raw_text = response.text
-                    citation_audit = verify_citations_grounding(raw_text, chunks)
                     clean_text = sanitize_citations(raw_text, num_chunks)
                     clean_text = clean_grounded_answer(clean_text)
+                    citation_audit = verify_citations_grounding(clean_text, chunks)
                     actual_tokens = 0
                     if hasattr(response, "usage_metadata") and response.usage_metadata:
                         actual_tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
@@ -378,9 +471,9 @@ def generate_grounded_answer(
         content = response.choices[0].message.content if response.choices else ""
         if not content or not content.strip():
             return unavailable_answer()
-        citation_audit = verify_citations_grounding(content, chunks)
         clean_text = sanitize_citations(content, num_chunks)
         clean_text = clean_grounded_answer(clean_text)
+        citation_audit = verify_citations_grounding(clean_text, chunks)
         actual_tokens = getattr(response.usage, "total_tokens", 0) if hasattr(response, "usage") and response.usage else 0
         return {
             "answer": clean_text,
@@ -410,7 +503,7 @@ def stream_grounded_answer(
         system_content += f"\n\nSPECIALIZED AUDIT PERSONA:\n{persona_addon}"
 
     user_content = build_grounded_prompt(query, chunks, persona_addon)
-    active_model = model_override or get_gemma_model()
+    active_model = model_override or get_default_model()
     visual_images = extract_visual_images_from_chunks(chunks)
     streamed_any = False
     emitted = []
@@ -470,7 +563,7 @@ def stream_grounded_answer(
             ]
 
         stream = client.chat.completions.create(
-            model=active_model if model_override else LLM_MODEL,
+            model=active_model,
             messages=messages,
             temperature=0.2,
             max_tokens=600,
