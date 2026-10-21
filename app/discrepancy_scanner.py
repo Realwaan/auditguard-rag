@@ -131,13 +131,16 @@ Audit the claim against the visual data and output JSON."""
                         if json_match:
                             parsed = json.loads(json_match.group(0))
                             if "status" in parsed:
+                                raw_status = parsed.get("status", "ALIGN")
+                                status_label = "VERIFIED_ALIGNED" if raw_status == "ALIGN" else raw_status
                                 return {
                                     "paragraph_id": p_node.id,
                                     "visual_id": v_node.id,
                                     "page": p_node.page,
                                     "image_url": v_node.image_url,
                                     "multimodal_verified": bool(img_tuple),
-                                    **parsed
+                                    **parsed,
+                                    "status": status_label
                                 }
             except Exception as ge:
                 print(f"[AuditGuard Google GenAI Cross-Modal Check]: {ge}")
@@ -168,13 +171,16 @@ Audit the claim against the visual data and output JSON."""
                 json_match = re.search(r'\{.*\}', raw, re.DOTALL)
                 if json_match:
                     parsed = json.loads(json_match.group(0))
+                    raw_status = parsed.get("status", "ALIGN")
+                    status_label = "VERIFIED_ALIGNED" if raw_status == "ALIGN" else raw_status
                     return {
                         "paragraph_id": p_node.id,
                         "visual_id": v_node.id,
                         "page": p_node.page,
                         "image_url": v_node.image_url,
                         "multimodal_verified": bool(img_tuple),
-                        **parsed
+                        **parsed,
+                        "status": status_label
                     }
             except Exception:
                 pass
@@ -190,19 +196,19 @@ Audit the claim against the visual data and output JSON."""
             **heuristic
         }
 
-    # Default aligned state with honest confidence reporting when deep model is offline
+    # Explicit UNVERIFIED state: Absence of heuristic contradiction is not proof of alignment
     return {
         "paragraph_id": p_node.id,
         "visual_id": v_node.id,
         "page": p_node.page,
         "image_url": v_node.image_url,
         "multimodal_verified": False,
-        "status": "ALIGN",
-        "title": "Cross-Modal Alignment (Heuristic Pass)",
+        "status": "UNVERIFIED",
+        "title": "Cross-Modal Heuristic Pass (Deep Vision Pending)",
         "text_claim": p_node.text[:120] + "...",
         "visual_fact": v_node.text[:120] + "...",
         "discrepancy_delta": "No heuristic contradictions detected between prose and chart. Deep vision verification pending multimodal active model.",
-        "confidence": 0.60
+        "confidence": 0.50
     }
 
 
@@ -210,6 +216,7 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
     """
     Full AST Discrepancy Scan:
     Audits every cross-modal sibling link in the document and returns a summary report.
+    Never counts unverified pairs as aligned in the overall consistency score.
     """
     findings: List[Dict[str, Any]] = []
     links = ast.get_cross_modal_links()
@@ -228,17 +235,28 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
             audit_item = audit_cross_modal_pair(p_node, v_node, use_llm=use_llm)
             findings.append(audit_item)
 
-    contradictions_count = sum(1 for f in findings if f["status"] == "CONTRADICTION")
+    contradictions_count = sum(1 for f in findings if f["status"] in ("CONTRADICTION", "VERIFIED_CONTRADICTION"))
     caution_count = sum(1 for f in findings if f["status"] == "CAUTION")
-    aligned_count = sum(1 for f in findings if f["status"] == "ALIGN")
+    aligned_count = sum(1 for f in findings if f["status"] in ("ALIGN", "VERIFIED_ALIGNED") and f.get("multimodal_verified", False))
+    unverified_count = sum(1 for f in findings if f["status"] == "UNVERIFIED" or not f.get("multimodal_verified", False) and f["status"] not in ("CONTRADICTION", "CAUTION"))
 
     total_pairs = len(findings)
     if total_pairs == 0:
         consistency_score = 0.0
         verdict = "NO_PAIRS"
+    elif contradictions_count > 0:
+        consistency_score = round(((aligned_count + 0.5 * caution_count) / total_pairs) * 100, 1)
+        verdict = "FLAGGED"
+    elif caution_count > 0:
+        consistency_score = round(((aligned_count + 0.5 * caution_count) / total_pairs) * 100, 1)
+        verdict = "CAUTION"
+    elif unverified_count == total_pairs:
+        # All pairs lack deep vision verification - do not fabricate 100% consistency
+        consistency_score = 0.0
+        verdict = "UNVERIFIED"
     else:
         consistency_score = round(((aligned_count + 0.5 * caution_count) / total_pairs) * 100, 1)
-        verdict = "FLAGGED" if contradictions_count > 0 else ("CAUTION" if caution_count > 0 else "CONSISTENT")
+        verdict = "CONSISTENT"
 
     return {
         "doc_id": ast.doc_id,
@@ -247,6 +265,7 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
         "contradictions_count": contradictions_count,
         "caution_count": caution_count,
         "aligned_count": aligned_count,
+        "unverified_count": unverified_count,
         "consistency_score": consistency_score,
         "score": consistency_score,
         "verdict": verdict,

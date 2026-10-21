@@ -9,12 +9,16 @@ from app.config import LLM_MODEL, USE_GOOGLE_GENAI, get_gemma_model
 BASE_SYSTEM_PROMPT = """You are AuditGuard, a defense-grade document intelligence and compliance verification copilot.
 Your job is to answer questions strictly and exclusively using the provided numbered source excerpts.
 
-STRICT GROUNDING RULES:
-1. Every factual statement or recommendation MUST cite its supporting excerpt using citation badges like [1], [2], etc.
-2. If the provided excerpts do not explicitly contain the answer, reply ONLY with:
+STRICT GROUNDING & STRUCTURING RULES:
+1. Every factual statement, metric, condition, or procedure MUST cite its supporting excerpt using in-line citation badges like [1], [2], etc.
+2. Directly answer the question in the opening sentence without conversational preambles (do NOT start with "Based on the provided excerpts", "According to document [1]", or "Sure").
+3. For multi-part answers, metrics, penalties, or procedures, format them into clean, executive bullet points with bold field names:
+   • **Parameter / Finding:** Value and conditions [1]
+   • **Enforcement / Rule:** Specific requirement or consequence [2]
+4. If the provided excerpts do not explicitly contain the answer, reply ONLY with:
    "I cannot verify this information in the provided document excerpts."
-3. Do NOT invent, assume, extrapolate, or use outside unverified knowledge.
-4. Keep answers professional, concise, and audit-ready.
+5. Do NOT invent, assume, extrapolate, or use outside unverified knowledge.
+6. Keep answers professional, concise, and audit-ready.
 """
 
 def build_grounded_prompt(query: str, chunks: List[Dict[str, Any]], persona_addon: str = "") -> str:
@@ -36,7 +40,50 @@ def build_grounded_prompt(query: str, chunks: List[Dict[str, Any]], persona_addo
 USER QUESTION:
 {query}
 
-REMINDER: Answer strictly from the excerpts above. Cite [1], [2] for every claim. If unverified, refuse to guess."""
+REMINDER: Answer strictly from the excerpts above. Cite [1], [2] directly on each claim. Format clearly with direct lead sentences and structured bold bullets if multi-part. If unverified, refuse to guess."""
+
+def clean_grounded_answer(text: str) -> str:
+    """
+    Cleans and structures model output for audit-grade presentation:
+    - Strips repetitive conversational throat-clearing / preambles.
+    - Normalizes citation badge spacing (e.g. '[ 1 ]' -> '[1]', 'clause . [1]' -> 'clause [1].').
+    - Cleans up excessive vertical whitespace.
+    """
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+
+    # If it's a refusal response, leave intact
+    if "I cannot verify this information" in cleaned:
+        return cleaned
+
+    # Strip conversational preambles
+    preamble_patterns = [
+        r'^(?:Based on the (?:provided )?(?:documents?|excerpts?|records?|context)[^,\n]*,\s*)',
+        r'^(?:According to the (?:provided )?(?:documents?|excerpts?|records?|context)[^,\n]*,\s*)',
+        r'^(?:Sure(?: thing)?[!,.]?\s*(?:Here (?:is|are)[^:\n]*:?\s*)?)',
+        r'^(?:Certainly[!,.]?\s*(?:Here (?:is|are)[^:\n]*:?\s*)?)',
+    ]
+    for pat in preamble_patterns:
+        cleaned = re.sub(pat, '', cleaned, flags=re.IGNORECASE).strip()
+
+    # Capitalize the first letter if stripped
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    # Normalize badge formatting: [ 1 ] -> [1]
+    cleaned = re.sub(r'\[\s+(\d+)\s+\]', r'[\1]', cleaned)
+    # Fix punctuation detached from citation badges: "guarantee . [1]" -> "guarantee [1]."
+    cleaned = re.sub(r'\s+([,.;])\s*\[(\d+)\]', r' [\2]\1', cleaned)
+
+    # Normalize unicode bullet characters to standard Markdown dashes
+    cleaned = re.sub(r'^[•●■◆]\s*', '- ', cleaned, flags=re.MULTILINE)
+
+    # Normalize multiple blank lines (max 2 consecutive newlines)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+
+    return cleaned.strip()
 
 def sanitize_citations(text: str, max_chunk: int) -> str:
     """Clamps or strips citations referencing non-existent chunks (e.g. [5] when only 2 chunks exist, or invalid [0])."""
@@ -52,29 +99,64 @@ def sanitize_citations(text: str, max_chunk: int) -> str:
 def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Rigorously verifies that claims citing [1], [2], etc. are genuinely supported by their referenced chunks.
-    Isolates the clause associated with each citation badge and validates numbers, percentages,
-    and content keywords to prevent unsupported assertions or fabricated citation tags.
+    Distinguishes four verification outcomes:
+      - VERIFIED: All claims have valid citation IDs and verified numerical/lexical evidence.
+      - NO_CITATIONS: Factual assertions were generated without required citation tags.
+      - INVALID_CITATION: Citations reference non-existent or out-of-range chunk IDs.
+      - UNSUPPORTED_CLAIM: Cited excerpt does not contain the claimed figures or sufficient text support.
     """
-    if not answer or not chunks:
+    if not answer:
         return {
             "all_supported": True,
+            "verdict": "REFUSAL",
             "total_citations": 0,
             "unsupported_count": 0,
-            "verified_citations": []
+            "verified_citations": [],
+            "reason": "Empty answer."
+        }
+
+    is_refusal = any(phrase in answer.lower() for phrase in [
+        "cannot verify", "unverifiable", "refusal protocol", "out-of-bounds", 
+        "no relevant text", "does not contain"
+    ])
+    if is_refusal:
+        return {
+            "all_supported": True,
+            "verdict": "REFUSAL",
+            "total_citations": 0,
+            "unsupported_count": 0,
+            "verified_citations": [],
+            "reason": "Refusal answer contains no factual claims requiring citation."
+        }
+
+    if not chunks:
+        return {
+            "all_supported": False,
+            "verdict": "NO_EVIDENCE",
+            "total_citations": 0,
+            "unsupported_count": 0,
+            "verified_citations": [],
+            "reason": "No evidence chunks provided to verify citations against."
         }
 
     chunk_map = {c.get("citation_id", idx + 1): c for idx, c in enumerate(chunks)}
     citation_positions = list(re.finditer(r'\[(\d+)\]', answer))
+    
     if not citation_positions:
+        # Factual claims without any citation tags fail closed
         return {
-            "all_supported": True,
+            "all_supported": False,
+            "verdict": "NO_CITATIONS",
             "total_citations": 0,
             "unsupported_count": 0,
-            "verified_citations": []
+            "verified_citations": [],
+            "reason": "Answer contains factual claims but completely lacks required citation badges [1], [2]."
         }
 
     verified_list = []
     unsupported_count = 0
+    has_invalid_id = False
+    has_unsupported_claim = False
     total_citations = 0
 
     prev_end = 0
@@ -95,10 +177,11 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
         target_chunk = chunk_map.get(cid)
         if not target_chunk:
             unsupported_count += 1
+            has_invalid_id = True
             verified_list.append({
                 "citation_id": cid,
                 "supported": False,
-                "reason": "Citation ID out of bounds",
+                "reason": f"Citation ID [{cid}] out of bounds (evidence pool size: {len(chunks)})",
                 "claim_excerpt": claim_clause[:100]
             })
             continue
@@ -131,6 +214,7 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
         is_supported = (overlap_ratio >= 0.25) and not number_mismatch
         if not is_supported:
             unsupported_count += 1
+            has_unsupported_claim = True
 
         verified_list.append({
             "citation_id": cid,
@@ -144,8 +228,18 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
             )
         })
 
+    if has_invalid_id:
+        verdict = "INVALID_CITATION"
+    elif has_unsupported_claim:
+        verdict = "UNSUPPORTED_CLAIM"
+    elif total_citations == 0:
+        verdict = "NO_CITATIONS"
+    else:
+        verdict = "VERIFIED"
+
     return {
-        "all_supported": (unsupported_count == 0),
+        "all_supported": (unsupported_count == 0 and total_citations > 0),
+        "verdict": verdict,
         "total_citations": total_citations,
         "unsupported_count": unsupported_count,
         "verified_citations": verified_list
@@ -207,12 +301,14 @@ def generate_grounded_answer(
                     contents=contents,
                 )
                 if response and response.text:
-                    clean_text = sanitize_citations(response.text, num_chunks)
+                    raw_text = response.text
+                    citation_audit = verify_citations_grounding(raw_text, chunks)
+                    clean_text = sanitize_citations(raw_text, num_chunks)
+                    clean_text = clean_grounded_answer(clean_text)
                     actual_tokens = 0
                     if hasattr(response, "usage_metadata") and response.usage_metadata:
                         actual_tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
                     
-                    citation_audit = verify_citations_grounding(clean_text, chunks)
                     return {
                         "answer": clean_text,
                         "tokens": actual_tokens,
@@ -248,9 +344,10 @@ def generate_grounded_answer(
             max_tokens=600
         )
         content = response.choices[0].message.content or "No response from Gemma."
+        citation_audit = verify_citations_grounding(content, chunks)
         clean_text = sanitize_citations(content, num_chunks)
+        clean_text = clean_grounded_answer(clean_text)
         actual_tokens = getattr(response.usage, "total_tokens", 0) if hasattr(response, "usage") and response.usage else 0
-        citation_audit = verify_citations_grounding(clean_text, chunks)
         return {
             "answer": clean_text,
             "tokens": actual_tokens,
@@ -270,8 +367,8 @@ def generate_grounded_answer(
             page = top_c.get("page", 1)
             
             fallback_text = (
-                f"According to verified agreement records [{cid}], {excerpt} "
-                f"\n\n*(Verified in {doc}, Section/Page {page}. Generated via AuditGuard Extractive Fallback.)*"
+                f"{excerpt} [{cid}]\n\n"
+                f"*(Verified in {doc}, Page {page}. Generated via AuditGuard Extractive Fallback)*"
             )
             citation_audit = verify_citations_grounding(fallback_text, chunks)
             return {
@@ -369,6 +466,6 @@ def stream_grounded_answer(
             top_c = chunks[0]
             excerpt = top_c.get("parent_text", "").strip()
             cid = top_c.get("citation_id", 1)
-            yield f"According to verified agreement records [{cid}], {excerpt} *(AuditGuard Extractive Fallback)*"
+            yield f"{excerpt} [{cid}] *(AuditGuard Extractive Fallback)*"
         else:
             yield "I cannot verify this information in the provided document excerpts."

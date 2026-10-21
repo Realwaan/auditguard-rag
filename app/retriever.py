@@ -20,6 +20,9 @@ class HybridRetriever:
             nid = c.get("ast_node_id")
             if nid:
                 self.node_id_to_indices.setdefault(nid, []).append(c_idx)
+            # Map linked visual and sibling node IDs so visual hits are not discarded during fusion
+            for linked_id in c.get("linked_node_ids", []):
+                self.node_id_to_indices.setdefault(linked_id, []).append(c_idx)
 
         # Tokenize child sentences for BM25
         if not chunks:
@@ -33,15 +36,16 @@ class HybridRetriever:
         if not self.chunks or len(self.chunks) == 0 or self.bm25 is None:
             return []
 
-        # 1. Sparse BM25 Search
+        # 1. Sparse BM25 Search with expanded candidate pool to prevent deduplication starvation
         query_tokens = query.lower().split()
         bm25_scores = self.bm25.get_scores(query_tokens)
-        bm25_rank_indices = np.argsort(bm25_scores)[::-1][:top_k * 3]
+        candidate_window = min(len(self.chunks), max(50, top_k * 8))
+        bm25_rank_indices = np.argsort(bm25_scores)[::-1][:candidate_window]
 
         # 2. Dense Vector Dot Product Search
         q_vec = embed_query(query)
         dense_scores = np.dot(self.embeddings, q_vec)
-        dense_rank_indices = np.argsort(dense_scores)[::-1][:top_k * 3]
+        dense_rank_indices = np.argsort(dense_scores)[::-1][:candidate_window]
 
         # 3. Reciprocal Rank Fusion (RRF)
         # RRF_Score = sum(1.0 / (k_rrf + rank))
@@ -157,17 +161,19 @@ class HybridRetriever:
             matching_tokens = sum(1 for t in query_tokens if re.search(r'\b' + re.escape(t) + r'\b', page_lower))
             lexical_ratio = matching_tokens / max(1, len(query_tokens))
 
-            # Composite whole-page relevance score
+            # Calibrated whole-page relevance:
+            # Evaluates page coverage when chunk-level retrieval is ambiguous
+            pos_dense = max(0.0, max_dense)
             if lexical_ratio >= 0.50:
-                composite_score = round(max(max_dense, 0.50 + (lexical_ratio * 0.35)), 3)
+                composite_score = round(max(pos_dense, 0.40 + (lexical_ratio * 0.30)), 3)
             else:
-                composite_score = round((max_dense * 0.60 + lexical_ratio * 0.40), 3)
+                composite_score = round((pos_dense * 0.55 + lexical_ratio * 0.45), 3)
 
             if composite_score > best_score:
                 best_score = composite_score
                 best_page = p
                 best_text = page_text
-                best_dense = max(max_dense, round(composite_score * 0.85, 3)) if lexical_ratio >= 0.50 else max_dense
+                best_dense = max_dense  # Preserve RAW dense similarity without synthetic inflation
                 best_lexical = lexical_ratio
 
         # If whole-page context satisfies threshold, promote to whole-page synthesis with genuine telemetry
@@ -180,7 +186,9 @@ class HybridRetriever:
                 "filename": filename,
                 "page": best_page,
                 "dense_score": round(best_dense, 3),
+                "lexical_recall": round(best_lexical, 3),
                 "bm25_score": round(best_lexical, 3),
+                "page_relevance": round(best_score, 3),
                 "rrf_score": round(best_score, 3),
                 "escalated_from": "whole_page_scan"
             }]

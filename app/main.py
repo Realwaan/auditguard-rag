@@ -317,6 +317,63 @@ def get_doc_context(doc_id: Optional[str] = None, session_id: Optional[str] = No
     ast = DOCUMENT_ASTS.get(target_doc_id)
     return target_doc_id, vault_entry, retriever, classification, ast
 
+def execute_rag_retrieval_and_eval(
+    retriever: HybridRetriever,
+    query: str,
+    ast: Optional[DocumentAST] = None,
+    top_k: int = TOP_K
+) -> tuple[list, dict, float]:
+    """
+    Unified RAG Retrieval & Evaluation Service:
+    Used by both synchronous (/ask) and streaming (/ask-stream) endpoints.
+    Executes:
+      1. Hybrid RRF Retrieval (BM25 + Dense + LanceDB)
+      2. AST Cross-Modal Sibling Hydration
+      3. CRAG Gatekeeper Evaluation
+      4. Tier-2 AST Whole-Page Escalation if chunk relevance is ambiguous
+    """
+    t0 = time.perf_counter()
+    retrieved = retriever.retrieve(query, top_k=top_k)
+    retrieval_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+    # Cross-modal sibling hydration
+    if ast:
+        for chunk in retrieved:
+            ast_id = chunk.get("ast_node_id")
+            if ast_id:
+                node = ast.get_node(ast_id)
+                if node and node.linked_node_ids:
+                    linked_visuals = []
+                    for lid in node.linked_node_ids:
+                        v_node = ast.get_node(lid)
+                        if v_node and v_node.image_url:
+                            linked_visuals.append({
+                                "id": v_node.id,
+                                "title": v_node.title,
+                                "image_url": v_node.image_url,
+                                "visual_type": v_node.visual_type,
+                                "page": v_node.page
+                            })
+                    if linked_visuals:
+                        chunk["linked_visuals"] = linked_visuals
+                        if not chunk.get("image_url"):
+                            chunk["image_url"] = linked_visuals[0]["image_url"]
+                            chunk["has_visual"] = True
+
+    eval_result = evaluate_relevance(retrieved, query=query)
+
+    # Tier 2 AST Whole-Page Escalation
+    if eval_result["status"] == "REFUSE" and retriever:
+        candidate_pages = [c.get("page") for c in retrieved if c.get("page")]
+        escalated_chunks = retriever.escalate_page_scan(query, candidate_pages, ast=ast)
+        if escalated_chunks:
+            escalated_eval = evaluate_relevance(escalated_chunks, query=query)
+            if escalated_eval["status"] != "REFUSE":
+                retrieved = escalated_chunks
+                eval_result = escalated_eval
+
+    return retrieved, eval_result, retrieval_ms
+
 @app.post("/ask")
 @app.post("/query")
 async def ask_question(payload: QueryRequest):
@@ -340,57 +397,17 @@ async def ask_question(payload: QueryRequest):
 
     t_total_start = time.perf_counter()
 
-    # 1. Hybrid RRF Retrieval with Microsecond Benchmarking
-    t0 = time.perf_counter()
-    retrieved = retriever.retrieve(query, top_k=TOP_K)
-    retrieval_ms = round((time.perf_counter() - t0) * 1000, 2)
+    # 1. Unified Retrieval & Grounding Evaluation
+    retrieved, eval_result, retrieval_ms = execute_rag_retrieval_and_eval(
+        retriever, query, ast=ast, top_k=TOP_K
+    )
 
-    # 2. AST Cross-Modal Sibling Hydration
-    if ast:
-        for chunk in retrieved:
-            # Check if chunk has linked visual nodes
-            ast_id = chunk.get("ast_node_id")
-            if ast_id:
-                node = ast.get_node(ast_id)
-                if node and node.linked_node_ids:
-                    linked_visuals = []
-                    for lid in node.linked_node_ids:
-                        v_node = ast.get_node(lid)
-                        if v_node and v_node.image_url:
-                            linked_visuals.append({
-                                "id": v_node.id,
-                                "title": v_node.title,
-                                "image_url": v_node.image_url,
-                                "visual_type": v_node.visual_type,
-                                "page": v_node.page
-                            })
-                    if linked_visuals:
-                        chunk["linked_visuals"] = linked_visuals
-                        if not chunk.get("image_url"):
-                            chunk["image_url"] = linked_visuals[0]["image_url"]
-                            chunk["has_visual"] = True
-
-    # 3. Token Usage Estimation (~1.33 tokens per English word + 200 system tokens)
+    # 2. Token Usage Estimation (~1.33 tokens per English word + 200 system tokens)
     context_words = sum(len(c.get("parent_text", "").split()) for c in retrieved)
     query_words = len(query.split())
     estimated_tokens = int((context_words + query_words) * 1.33 + 200)
 
-    # 4. CRAG Relevance Gatekeeper (Tier 1: Chunk-Level Evaluation with Query Grounding)
-    eval_result = evaluate_relevance(retrieved, query=query)
-
-    # Tier 2 AST Whole-Page Escalation:
-    # If chunk-level relevance is ambiguous or falls below threshold,
-    # climb up the Document AST to scan the entire candidate page(s).
-    if eval_result["status"] == "REFUSE" and retriever:
-        candidate_pages = [c.get("page") for c in retrieved if c.get("page")]
-        escalated_chunks = retriever.escalate_page_scan(query, candidate_pages, ast=ast)
-        if escalated_chunks:
-            escalated_eval = evaluate_relevance(escalated_chunks, query=query)
-            if escalated_eval["status"] != "REFUSE":
-                retrieved = escalated_chunks
-                eval_result = escalated_eval
-
-    # 5. Check for Defense Refusal (If still unverifiable even after Whole-Page Escalation)
+    # 3. Check for Defense Refusal
     if eval_result["status"] == "REFUSE":
         plain_baseline = await asyncio.to_thread(call_plain_gemma, query) if payload.include_baseline else ""
         return {
@@ -410,7 +427,7 @@ async def ask_question(payload: QueryRequest):
             "doc_id": target_doc_id
         }
 
-    # 6 & 7. Synthesize Grounded Answer & Hallucination Baseline in PARALLEL (50% Latency Reduction)
+    # 4 & 5. Synthesize Grounded Answer & Hallucination Baseline in PARALLEL (50% Latency Reduction)
     persona = classification.get("prompt_addon", "")
     model_choice = payload.model or get_gemma_model()
 
@@ -441,13 +458,15 @@ async def ask_question(payload: QueryRequest):
 
     reported_tokens = actual_tokens if actual_tokens > 0 else (0 if is_fallback else estimated_tokens)
     status = "SUCCESS"
+    citation_verdict = citation_verification.get("verdict", "VERIFIED")
+    
     if "I cannot verify this information" in grounded_answer:
         status = "REFUSE"
         eval_result["status"] = "REFUSE"
         eval_result["badge"] = "⚠️ OUT-OF-BOUNDS (Refused)"
-    elif citation_verification.get("total_citations", 0) > 0 and not citation_verification.get("all_supported", True):
+    elif not citation_verification.get("all_supported", True) or citation_verdict in ("NO_CITATIONS", "INVALID_CITATION", "UNSUPPORTED_CLAIM"):
         status = "CAUTION_UNSUPPORTED_CITATION"
-        eval_result["badge"] = "⚠️ CAUTION: Unverified Citation Grounding"
+        eval_result["badge"] = f"⚠️ CAUTION: {citation_verdict} Grounding Warning"
 
     return {
         "query": query,
@@ -501,7 +520,7 @@ async def ask_stream(
     model: Optional[str] = None
 ):
     """Real-time SSE token streaming endpoint with Session Isolation and non-blocking event loop execution."""
-    target_doc_id, vault_entry, retriever, classification, _ = get_doc_context(doc_id, session_id)
+    target_doc_id, vault_entry, retriever, classification, ast = get_doc_context(doc_id, session_id)
 
     if not retriever:
         return StreamingResponse(iter(["Error: No document loaded."]), media_type="text/plain")
@@ -510,8 +529,10 @@ async def ask_stream(
     if not clean_query:
         return StreamingResponse(iter(["Error: Query cannot be empty."]), media_type="text/plain")
 
-    retrieved = retriever.retrieve(clean_query, top_k=TOP_K)
-    eval_result = evaluate_relevance(retrieved, query=clean_query)
+    # Unified RAG retrieval & evaluation (with cross-modal hydration & whole-page escalation)
+    retrieved, eval_result, _ = execute_rag_retrieval_and_eval(
+        retriever, clean_query, ast=ast, top_k=TOP_K
+    )
 
     if eval_result["status"] == "REFUSE":
         async def refuse_generator():

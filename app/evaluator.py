@@ -22,26 +22,39 @@ STOP_WORDS = {
     "why", "with", "would", "you", "your", "yours", "yourself", "yourselves"
 }
 
+NUMBER_WORDS = {
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    "hundred", "thousand", "million", "billion", "percent", "percentage"
+}
+
+NEGATION_WORDS = {
+    "no", "not", "never", "none", "neither", "nor", "prohibited", "banned",
+    "disallowed", "unauthorized", "excluding", "without", "except"
+}
+
 def extract_query_keywords(query: str) -> List[str]:
     """Extract content-bearing keywords from query using word boundaries, filtering common stopwords."""
     tokens = re.findall(r'\b[a-zA-Z0-9_\-\.]{3,}\b', query.lower())
     return [t for t in tokens if t not in STOP_WORDS]
 
-def verify_logical_entailment(
+def evaluate_heuristic_entailment(
     context_text: str,
     query: str,
     top_dense: float,
     lexical_recall: float
 ) -> Dict[str, Any]:
     """
-    Formal Natural Language Inference (NLI) & Entailment Verifier:
-    Determines if the premise logically entails, is neutral to, or contradicts
-    the query/hypothesis.
+    Heuristic Claim-Evidence Alignment & Proposition Gate:
+    Evaluates whether the retrieved premise provides direct, answer-bearing evidence
+    for the query hypothesis using composite lexical overlap, quantitative presence,
+    and semantic similarity signals.
     
-    Distinguishes topical keyword match from genuine answer-bearing entailment:
-      - ENTAILED: The premise directly supplies the answer target (metrics, conditions, facts)
-      - NEUTRAL: The premise is related in topic but does not supply the answer / missing required evidence
-      - CONTRADICTORY: The premise asserts facts contrary to the query proposition
+    Treats heuristic scores as signals, distinguishing:
+      - ENTAILED: Premise directly supplies answer target (metrics, conditions, facts)
+      - NEUTRAL: Premise discusses topic but lacks required answer target / evidence
+      - CONTRADICTORY: Premise exhibits explicit polarity/negation divergence from query
     """
     if not query:
         # If no explicit query proposition, evaluate based on semantic density
@@ -50,14 +63,16 @@ def verify_logical_entailment(
                 "verdict": "ENTAILED",
                 "entailment_prob": round(min(0.98, top_dense), 3),
                 "is_answer_bearing": True,
-                "reason": "Retrieved context exceeds semantic density threshold."
+                "reason": "Retrieved context exceeds semantic density threshold.",
+                "method": "heuristic_semantic_density"
             }
         else:
             return {
                 "verdict": "NEUTRAL",
                 "entailment_prob": round(top_dense * 0.5, 3),
                 "is_answer_bearing": False,
-                "reason": "Retrieved context does not meet grounding threshold."
+                "reason": "Retrieved context does not meet grounding threshold.",
+                "method": "heuristic_semantic_density"
             }
 
     ctx_lower = context_text.lower()
@@ -69,28 +84,47 @@ def verify_logical_entailment(
         "uptime", "availability", "dollar", "cost", "fee", "cap", "sla"
     ])
     ctx_numbers = re.findall(r'\b\d+(?:\.\d+)?%?\b', ctx_lower)
+    ctx_word_numbers = [w for w in NUMBER_WORDS if re.search(r'\b' + re.escape(w) + r'\b', ctx_lower)]
+    has_numerical_target = bool(ctx_numbers) or bool(ctx_word_numbers)
 
-    if is_quantitative and not ctx_numbers and lexical_recall < 0.60:
+    if is_quantitative and not has_numerical_target and lexical_recall < 0.60:
         # Context is on-topic but lacks the actual numerical figure requested
         return {
             "verdict": "NEUTRAL",
             "entailment_prob": round(min(0.35, top_dense * 0.4), 3),
             "is_answer_bearing": False,
             "missing_target": "Quantitative metric/number missing from text",
-            "reason": "The context mentions the requested topic but lacks the specific quantitative metric or figure required to answer."
+            "reason": "The context mentions the requested topic but lacks the specific quantitative metric or figure required to answer.",
+            "method": "heuristic_target_verification"
         }
 
-    # 2. Proposition alignment probability
-    has_answer_target = bool(ctx_numbers) if is_quantitative else (lexical_recall >= 0.40)
+    # 2. Polarity / Negation Divergence Check
+    q_has_negation = any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in NEGATION_WORDS)
+    ctx_has_negation = any(re.search(r'\b' + re.escape(w) + r'\b', ctx_lower) for w in NEGATION_WORDS)
+    polarity_divergence = (q_has_negation != ctx_has_negation) and (lexical_recall >= 0.50)
+
+    # 3. Proposition alignment probability
+    has_answer_target = has_numerical_target if is_quantitative else (lexical_recall >= 0.40)
     
     if top_dense >= SIMILARITY_THRESHOLD and has_answer_target:
+        if polarity_divergence and not q_has_negation:
+            # Query is affirmative but context contains strict negative/prohibition
+            return {
+                "verdict": "CONTRADICTORY",
+                "entailment_prob": round(top_dense * 0.4, 3),
+                "is_answer_bearing": True,
+                "reason": "Retrieved context asserts restrictive or negative conditions contrary to affirmative query proposition.",
+                "method": "heuristic_polarity_divergence"
+            }
+        
         # Genuine entailment: Evidence provides the facts needed to answer
         entailment_prob = round(0.65 + 0.25 * min(1.0, top_dense) + 0.10 * min(1.0, lexical_recall), 3)
         return {
             "verdict": "ENTAILED",
             "entailment_prob": min(0.99, entailment_prob),
             "is_answer_bearing": True,
-            "reason": "Retrieved context contains direct, answer-bearing evidentiary propositions."
+            "reason": "Retrieved context contains direct, answer-bearing evidentiary propositions.",
+            "method": "heuristic_proposition_gate"
         }
     elif top_dense < SIMILARITY_THRESHOLD and lexical_recall < 0.45:
         return {
@@ -98,7 +132,8 @@ def verify_logical_entailment(
             "entailment_prob": round(top_dense * 0.5, 3),
             "is_answer_bearing": False,
             "missing_target": "Insufficient factual overlap",
-            "reason": "Retrieved excerpts lack necessary semantic alignment to verify the query."
+            "reason": "Retrieved excerpts lack necessary semantic alignment to verify the query.",
+            "method": "heuristic_proposition_gate"
         }
     else:
         # Borderline / Ambiguous
@@ -107,8 +142,12 @@ def verify_logical_entailment(
             "entailment_prob": round(top_dense * 0.6, 3),
             "is_answer_bearing": False,
             "missing_target": "Ambiguous evidence",
-            "reason": "Context discusses related subject matter but lacks complete evidentiary proof."
+            "reason": "Context discusses related subject matter but lacks complete evidentiary proof.",
+            "method": "heuristic_proposition_gate"
         }
+
+# Alias for backward compatibility with existing callers and tests
+verify_logical_entailment = evaluate_heuristic_entailment
 
 def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") -> Dict[str, Any]:
     """
@@ -152,20 +191,37 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
         # If no query string passed, rely on dense score alone
         lexical_recall = top_dense
 
-    # 3. Composite Grounding Confidence:
-    # 60% semantic similarity + 40% lexical keyword recall
-    composite_grounding = round((top_dense * 0.60 + lexical_recall * 0.40), 3)
-    confidence_pct = round(composite_grounding * 100, 1)
-
-    # 4. Formal Logical Entailment Verification
-    nli_eval = verify_logical_entailment(combined_context, query, top_dense, lexical_recall)
-    nli_verdict = nli_eval["verdict"]
-    nli_prob = nli_eval["entailment_prob"]
-
     # Escalation check
     is_promoted = any(c.get("escalated_from") == "whole_page_scan" for c in retrieved_chunks)
+    page_rel = max((float(c.get("page_relevance", 0.0)) for c in retrieved_chunks if c.get("escalated_from") == "whole_page_scan"), default=0.0)
+    effective_signal = max(top_dense, page_rel) if is_promoted else top_dense
+
+    # 3. Composite Grounding Confidence:
+    # 60% semantic similarity + 40% lexical keyword recall (or calibrated page relevance if escalated)
+    composite_grounding = round((top_dense * 0.60 + lexical_recall * 0.40), 3) if not is_promoted else round(page_rel, 3)
+    confidence_pct = round(composite_grounding * 100, 1)
+
+    # 4. Heuristic Claim-Evidence Alignment & Proposition Gate
+    nli_eval = evaluate_heuristic_entailment(combined_context, query, effective_signal, lexical_recall)
+    nli_verdict = nli_eval["verdict"]
+    nli_prob = nli_eval["entailment_prob"]
+    eval_method = nli_eval.get("method", "heuristic_proposition_gate")
 
     # Refusal decision: Requires positive entailment or minimum dense and keyword presence
+    if nli_verdict == "CONTRADICTION":
+        return {
+            "status": "REFUSE",
+            "confidence": confidence_pct,
+            "grounding_score": composite_grounding,
+            "dense_score": round(top_dense, 3),
+            "lexical_recall": round(lexical_recall, 3),
+            "nli_verdict": "CONTRADICTORY (RESTRICTION_DETECTED)",
+            "nli_entailment_prob": nli_prob,
+            "nli_method": eval_method,
+            "badge": f"⚠️ OUT-OF-BOUNDS (Contradictory Premise)",
+            "reason": nli_eval.get("reason", "Retrieved evidence directly contradicts the query proposition.")
+        }
+
     if nli_verdict == "NEUTRAL" and (top_dense < SIMILARITY_THRESHOLD or not nli_eval.get("is_answer_bearing", True)):
         reason_msg = nli_eval.get("reason", "The uploaded documents do not contain verified data answering this query.")
         return {
@@ -176,6 +232,7 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
             "lexical_recall": round(lexical_recall, 3),
             "nli_verdict": f"{nli_verdict} (UNVERIFIABLE)",
             "nli_entailment_prob": nli_prob,
+            "nli_method": eval_method,
             "badge": f"⚠️ OUT-OF-BOUNDS ({confidence_pct}% Grounding)",
             "reason": f"{reason_msg} Refusal protocol activated to prevent model hallucination."
         }
@@ -187,9 +244,9 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
     )
 
     reason_text = (
-        f"Verified contextual grounding recovered via Tier-2 AST Whole-Page Escalation (Density: {top_dense:.2f}, Keyword recall: {lexical_recall:.0%}, NLI Entailment: {nli_prob:.0%})."
+        f"Verified contextual grounding recovered via Tier-2 AST Whole-Page Escalation (Density: {top_dense:.2f}, Keyword recall: {lexical_recall:.0%}, Alignment Signal: {nli_prob:.0%})."
         if is_promoted
-        else f"Verified contextual grounding found in source documents (Density: {top_dense:.2f}, Keyword recall: {lexical_recall:.0%}, NLI Entailment: {nli_prob:.0%})."
+        else f"Verified contextual grounding found in source documents (Density: {top_dense:.2f}, Keyword recall: {lexical_recall:.0%}, Alignment Signal: {nli_prob:.0%})."
     )
 
     return {
@@ -200,6 +257,7 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
         "lexical_recall": round(lexical_recall, 3),
         "nli_verdict": nli_verdict,
         "nli_entailment_prob": nli_prob,
+        "nli_method": eval_method,
         "is_answer_bearing": nli_eval.get("is_answer_bearing", True),
         "badge": badge_label,
         "reason": reason_text

@@ -347,20 +347,52 @@ def link_cross_modal_symbols(ast: DocumentAST) -> None:
                     v_node.metadata["link_tier"] = 1
                     v_node.metadata["link_weight"] = 1.0
 
-    # 2. Tier 2: Spatial Adjacency Fallback for unreferenced visuals
+    # 2. Tier 2: Spatial Adjacency & Proximity Fallback for unreferenced visuals
     for v_node in visuals:
         if not v_node.linked_node_ids:
-            # Find paragraphs on the same page
             same_page_paras = [p for p in paragraphs if p.page == v_node.page]
             if same_page_paras:
-                # Link to the first or closest paragraph on the page
-                target_para = same_page_paras[0]
+                # Calculate spatial proximity based on bounding-box geometry if available
+                v_bbox = v_node.bbox
+                if v_bbox and len(v_bbox) == 4:
+                    v_mid_y = (v_bbox[1] + v_bbox[3]) / 2.0
+                    
+                    def _spatial_dist(p: ASTNode) -> float:
+                        if p.bbox and len(p.bbox) == 4:
+                            p_mid_y = (p.bbox[1] + p.bbox[3]) / 2.0
+                            return abs(v_mid_y - p_mid_y)
+                        # Caption cues in paragraph text give high priority
+                        if any(c in p.text.lower() for c in ["source:", "note:", "table", "figure", "shown below", "as illustrated"]):
+                            return 10.0
+                        return 100.0
+
+                    sorted_paras = sorted(same_page_paras, key=_spatial_dist)
+                    target_para = sorted_paras[0]
+                    link_conf = 0.75
+                else:
+                    # Caption cue priority followed by document reading order
+                    caption_paras = [p for p in same_page_paras if any(c in p.text.lower() for c in ["source:", "note:", "figure", "table"])]
+                    target_para = caption_paras[0] if caption_paras else same_page_paras[0]
+                    link_conf = 0.75
+
                 v_node.linked_node_ids.append(target_para.id)
                 target_para.linked_node_ids.append(v_node.id)
                 v_node.metadata["link_tier"] = 2
-                v_node.metadata["link_weight"] = 0.75
+                v_node.metadata["link_weight"] = link_conf
+                v_node.metadata["link_method"] = "spatial_proximity"
                 target_para.metadata.setdefault("link_tier", 2)
-                target_para.metadata.setdefault("link_weight", 0.75)
+                target_para.metadata.setdefault("link_weight", link_conf)
+                target_para.metadata.setdefault("link_method", "spatial_proximity")
+            else:
+                # Tier 3: Parent Section Fallback for standalone figure pages
+                sections = [n for n in ast.nodes.values() if n.type == ASTNodeType.SECTION]
+                if sections:
+                    closest_sec = sections[-1]
+                    v_node.linked_node_ids.append(closest_sec.id)
+                    closest_sec.linked_node_ids.append(v_node.id)
+                    v_node.metadata["link_tier"] = 3
+                    v_node.metadata["link_weight"] = 0.50
+                    v_node.metadata["link_method"] = "parent_section_fallback"
 
 
 def build_document_ast(
