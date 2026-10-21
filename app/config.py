@@ -11,6 +11,11 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma-4")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "local-or-alma-key")
 
+# Google GenAI Native Gemma 4 (31B)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+USE_GOOGLE_GENAI = os.getenv("USE_GOOGLE_GENAI", "true").lower() in ("true", "1", "yes")
+GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+
 # Storage & Paths
 DATA_DIR = BASE_DIR / "data"
 DOCS_DIR = DATA_DIR / "docs"

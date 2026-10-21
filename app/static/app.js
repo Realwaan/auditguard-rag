@@ -6,14 +6,81 @@ let LAST_QUERY_DATA = null;
 document.addEventListener("DOMContentLoaded", () => {
     setupUploadHandlers();
     setupCompareToggle();
+    setupKeyboardShortcuts();
     checkInitialHealth();
     loadVault();
+    if (window.marked) {
+        marked.setOptions({ gfm: true, breaks: true });
+    }
 });
 
+// ----------------------------------------------------
+// KEYBOARD SHORTCUTS & GENERAL UX
+// ----------------------------------------------------
+function setupKeyboardShortcuts() {
+    const queryInput = document.getElementById("query-input");
+    if (queryInput) {
+        queryInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                submitQuery();
+            }
+        });
+    }
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            closeProofDrawer();
+            closeASTModal();
+            closeContradictionsModal();
+            closeComplianceAuditModal();
+        }
+    });
+}
+
+function showToast(message, type = "success") {
+    const container = document.getElementById("toast-container");
+    if (!container) return;
+
+    const toast = document.createElement("div");
+    const bgClass = type === "error" ? "bg-rose-950/90 border-rose-800 text-rose-200" :
+                    type === "info"  ? "bg-slate-900/90 border-cyan-800/80 text-cyan-200" :
+                                       "bg-slate-900/90 border-emerald-500/50 text-emerald-200";
+
+    const icon = type === "error" ? "alert-circle" :
+                 type === "info"  ? "info" : "check-circle";
+
+    toast.className = `flex items-center gap-2.5 px-4 py-3 rounded-xl border shadow-xl backdrop-blur-md text-xs font-medium pointer-events-auto transition-all duration-300 transform translate-y-2 opacity-0 ${bgClass}`;
+    toast.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4 shrink-0"></i> <span>${message}</span>`;
+
+    container.appendChild(toast);
+    if (window.lucide) lucide.createIcons();
+
+    // Trigger entry animation
+    requestAnimationFrame(() => {
+        toast.classList.remove("translate-y-2", "opacity-0");
+    });
+
+    // Auto remove after 3.5s
+    setTimeout(() => {
+        toast.classList.add("translate-y-2", "opacity-0");
+        setTimeout(() => toast.remove(), 350);
+    }, 3500);
+}
+
+// ----------------------------------------------------
+// INITIAL HEALTH & CLASSIFICATION
+// ----------------------------------------------------
 function checkInitialHealth() {
     fetch("/health")
         .then(r => r.json())
         .then(data => {
+            if (data.model) {
+                const engineBadge = document.getElementById("model-engine-badge");
+                if (engineBadge) {
+                    engineBadge.innerText = data.model;
+                }
+            }
             if (data.doc_loaded) {
                 updateDocBadge(data.classification || "General Enterprise Document", "📄");
             }
@@ -30,16 +97,16 @@ function setupUploadHandlers() {
 
     dropzone.addEventListener("dragover", (e) => {
         e.preventDefault();
-        dropzone.classList.add("border-emerald-500");
+        dropzone.classList.add("border-emerald-500", "bg-slate-950/80");
     });
 
     dropzone.addEventListener("dragleave", () => {
-        dropzone.classList.remove("border-emerald-500");
+        dropzone.classList.remove("border-emerald-500", "bg-slate-950/80");
     });
 
     dropzone.addEventListener("drop", (e) => {
         e.preventDefault();
-        dropzone.classList.remove("border-emerald-500");
+        dropzone.classList.remove("border-emerald-500", "bg-slate-950/80");
         if (e.dataTransfer.files.length > 0) {
             handleFileUpload(e.dataTransfer.files[0]);
         }
@@ -80,10 +147,12 @@ function handleFileUpload(file) {
         if (data.indexing_duration_ms !== undefined) {
             showIngestSpeed(data.indexing_duration_ms);
         }
+        showToast(`Indexed ${file.name} in ${(data.indexing_duration_ms/1000).toFixed(2)}s (Zero-LLM)`, "success");
         loadVault();
     })
     .catch(err => {
         chunksEl.innerText = "Error indexing file";
+        showToast("Failed to index file", "error");
         console.error(err);
     });
 }
@@ -91,13 +160,15 @@ function handleFileUpload(file) {
 function loadSampleDoc() {
     const btn = document.getElementById("btn-load-sample");
     const originalText = btn.innerHTML;
-    btn.innerHTML = `<span class="animate-spin">⏳</span> Slicing AST...`;
+    btn.innerHTML = `<span class="animate-spin inline-block mr-1">⏳</span> Slicing AST...`;
     btn.disabled = true;
 
     fetch("/load-sample", { method: "POST" })
         .then(r => r.json())
         .then(data => {
-            btn.innerHTML = `✅ Tree Ready`;
+            btn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5"></i> Tree Ready`;
+            if (window.lucide) lucide.createIcons();
+
             if (data.classification) {
                 updateDocBadge(data.classification.label, data.classification.icon);
             }
@@ -108,8 +179,9 @@ function loadSampleDoc() {
             if (data.indexing_duration_ms !== undefined) {
                 showIngestSpeed(data.indexing_duration_ms);
             }
+            showToast("Demo SOP & SLA indexed into LanceDB", "success");
             loadVault();
-            setTimeout(() => { btn.innerHTML = originalText; btn.disabled = false; }, 2000);
+            setTimeout(() => { btn.innerHTML = originalText; btn.disabled = false; if (window.lucide) lucide.createIcons(); }, 2000);
         })
         .catch(err => {
             btn.innerHTML = `❌ Failed`;
@@ -129,14 +201,19 @@ function showIngestSpeed(ms) {
 }
 
 function updateDocBadge(label, icon = "📄") {
-    document.getElementById("doc-badge-container").classList.remove("hidden");
+    const container = document.getElementById("doc-badge-container");
+    if (!container) return;
+    container.classList.remove("hidden");
+    container.classList.add("sm:flex");
     document.getElementById("doc-badge-icon").innerText = icon;
     document.getElementById("doc-badge-label").innerText = label;
 }
 
 function setQuery(text) {
     const cleanText = text.replace(/\(Refusal Test\)/, "").trim();
-    document.getElementById("query-input").value = cleanText;
+    const input = document.getElementById("query-input");
+    input.value = cleanText;
+    input.focus();
     submitQuery();
 }
 
@@ -158,6 +235,37 @@ function setupCompareToggle() {
     });
 }
 
+// ----------------------------------------------------
+// MARKDOWN RENDERING & CITATION FORMATTING
+// ----------------------------------------------------
+function formatAuditAnswer(markdownText) {
+    if (!markdownText) return "";
+    let html = "";
+    if (window.marked && typeof window.marked.parse === "function") {
+        html = window.marked.parse(markdownText);
+    } else {
+        html = markdownText.replace(/\n/g, "<br>");
+    }
+
+    // Convert [1], [2], [10] citation tokens into interactive Proof Drawer buttons
+    html = html.replace(/\[(\d+)\]/g, (match, p1) => {
+        return `<button type="button" onclick="openCitationByIndex(${p1})" class="citation-anchor" title="View Verified AST Proof for Citation [${p1}]"><span>[${p1}]</span></button>`;
+    });
+
+    return html;
+}
+
+function formatBaselineAnswer(markdownText) {
+    if (!markdownText) return `<p class="text-slate-500 italic py-4">No baseline response received.</p>`;
+    if (window.marked && typeof window.marked.parse === "function") {
+        return window.marked.parse(markdownText);
+    }
+    return markdownText.replace(/\n/g, "<br>");
+}
+
+// ----------------------------------------------------
+// QUERY EXECUTION & VERIFICATION ENGINE
+// ----------------------------------------------------
 async function submitQuery() {
     const queryInput = document.getElementById("query-input");
     const query = queryInput.value.trim();
@@ -165,6 +273,13 @@ async function submitQuery() {
 
     const btn = document.getElementById("btn-submit");
     btn.disabled = true;
+    const btnOriginalHtml = `<i data-lucide="check-circle" class="w-4 h-4"></i> <span>Verify</span>`;
+    let startTime = Date.now();
+    btn.innerHTML = `<span class="animate-spin inline-block">⏳</span> <span>Verifying...</span>`;
+    const timerInterval = setInterval(() => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        btn.innerHTML = `<span class="animate-spin inline-block">⏳</span> <span>Verifying (${elapsed}s)...</span>`;
+    }, 200);
 
     const answerContainer = document.getElementById("answer-container");
     const baselineContainer = document.getElementById("baseline-container");
@@ -175,9 +290,25 @@ async function submitQuery() {
     const pathDisplay = document.getElementById("ast-path-display");
     const visualStrip = document.getElementById("linked-visuals-strip");
 
-    answerContainer.innerHTML = `<p class="text-emerald-400 animate-pulse">Traversing AST Hierarchy & Sibling Pointers...</p>`;
-    baselineContainer.innerHTML = `<p class="text-slate-400 animate-pulse">Requesting plain baseline...</p>`;
+    // Skeleton loading state
+    answerContainer.innerHTML = `
+      <div class="space-y-3 py-3 animate-pulse">
+        <div class="h-4 bg-emerald-500/20 rounded w-3/4"></div>
+        <div class="h-3.5 bg-slate-800 rounded w-full"></div>
+        <div class="h-3.5 bg-slate-800 rounded w-5/6"></div>
+        <p class="text-[11px] font-mono text-emerald-400 mt-2">Traversing Document AST & Resolving Sibling Pointers...</p>
+      </div>`;
+
+    baselineContainer.innerHTML = `
+      <div class="space-y-2 py-3 animate-pulse">
+        <div class="h-3.5 bg-slate-800 rounded w-4/5"></div>
+        <div class="h-3 bg-slate-800/80 rounded w-full"></div>
+        <div class="h-3 bg-slate-800/80 rounded w-2/3"></div>
+        <p class="text-[11px] font-mono text-amber-400/80 mt-2">Querying ungrounded parametric baseline...</p>
+      </div>`;
+
     badge.innerText = "Evaluating...";
+    badge.className = "text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono font-medium border border-slate-700";
     chipsContainer.classList.add("hidden");
     chipsList.innerHTML = "";
     pathContainer.classList.add("hidden");
@@ -193,50 +324,88 @@ async function submitQuery() {
         });
 
         const data = await response.json();
+        clearInterval(timerInterval);
         btn.disabled = false;
+        btn.innerHTML = btnOriginalHtml;
+        if (window.lucide) lucide.createIcons();
         LAST_QUERY_DATA = data;
 
         const metricsBadge = document.getElementById("metrics-badge");
         if (metricsBadge && data.retrieval_ms !== undefined) {
-            metricsBadge.innerText = `⚡ ${data.retrieval_ms}ms | ~${data.estimated_tokens || 0} tok`;
+            const totalStr = data.total_ms !== undefined 
+                ? (data.total_ms < 1000 ? `${data.total_ms}ms` : `${(data.total_ms / 1000).toFixed(1)}s`)
+                : null;
+            if (totalStr) {
+                metricsBadge.innerText = `⚡ Retrieval: ${data.retrieval_ms}ms · Total: ${totalStr} | ~${data.estimated_tokens || 0} tok`;
+            } else {
+                metricsBadge.innerText = `⚡ Retrieval: ${data.retrieval_ms}ms | ~${data.estimated_tokens || 0} tok`;
+            }
         }
 
         if (!response.ok) {
-            answerContainer.innerHTML = `<p class="text-red-400">❌ ${data.detail || "Error querying system"}</p>`;
+            answerContainer.innerHTML = `<div class="p-4 rounded-xl bg-rose-950/40 border border-rose-900 text-rose-200 text-xs">
+                <p class="font-bold flex items-center gap-1.5 mb-1"><i data-lucide="alert-circle" class="w-4 h-4"></i> Query Error</p>
+                <p>${data.detail || "Error querying document intelligence engine"}</p>
+            </div>`;
+            if (window.lucide) lucide.createIcons();
             return;
         }
 
         // 1. Render Grounding Confidence Badge
         badge.innerText = data.evaluation.badge;
         if (data.status === "REFUSE") {
-            badge.className = "text-[11px] px-2.5 py-1 rounded-full bg-red-950 text-red-400 font-mono font-medium border border-red-800";
-            answerContainer.innerHTML = `<div class="p-3.5 bg-red-950/40 border border-red-900/60 rounded-lg text-red-200">
-                <p class="font-bold mb-1">🛡️ DEFENSE REFUSAL ACTIVATED</p>
-                <p>${data.answer}</p>
-            </div>`;
+            badge.className = "text-[11px] px-2.5 py-0.5 rounded-full bg-rose-950 text-rose-300 font-mono font-bold border border-rose-800 shadow-sm";
+            answerContainer.innerHTML = `
+              <div class="p-4 bg-rose-950/40 border border-rose-900/80 rounded-xl text-rose-200">
+                <div class="flex items-center gap-2 mb-2 font-bold text-rose-300">
+                  <i data-lucide="shield-alert" class="w-5 h-5 text-rose-400"></i>
+                  <span>DEFENSE REFUSAL ACTIVATED (CRAG Gatekeeper)</span>
+                </div>
+                <p class="text-xs leading-relaxed mb-2">${data.answer}</p>
+                <div class="p-2 rounded bg-rose-950/80 border border-rose-900 text-[11px] font-mono text-rose-300">
+                  Epistemic Humility Rule: When context relevance falls below threshold (τ = 0.50), AuditGuard strictly refuses rather than hallucinating facts.
+                </div>
+              </div>`;
         } else {
-            badge.className = "text-[11px] px-2.5 py-1 rounded-full bg-emerald-950 text-emerald-300 font-mono font-medium border border-emerald-800";
+            badge.className = "text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-300 font-mono font-bold border border-emerald-700/80 shadow-sm flex items-center gap-1";
             
-            let formattedAnswer = data.answer.replace(/\[(\d+)\]/g, (match, p1) => {
-                return `<button onclick="openCitationByIndex(${p1})" class="inline-flex items-center px-1.5 py-0.2 mx-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold hover:bg-emerald-500 hover:text-white transition cursor-pointer">[${p1}]</button>`;
-            });
-
-            answerContainer.innerHTML = `<div class="whitespace-pre-wrap">${formattedAnswer}</div>`;
+            const renderedHtml = formatAuditAnswer(data.answer);
+            answerContainer.innerHTML = renderedHtml;
         }
 
-        // 2. Traversed AST Path Display
+        // 2. Traversed AST Path Display (Interactive Breadcrumb)
         ACTIVE_SOURCES = data.sources || [];
         if (ACTIVE_SOURCES.length > 0) {
             const topSource = ACTIVE_SOURCES[0];
-            const matPath = topSource.materialized_path || `root/section_${topSource.page}/p_${topSource.citation_id || 1}`;
-            pathDisplay.innerHTML = `<span class="text-purple-400">root</span> ➔ <span class="text-blue-400">Section (P${topSource.page})</span> ➔ <span class="text-slate-300">Paragraph [${topSource.citation_id || 1}]</span>${topSource.linked_visuals ? ' ⟷ <span class="text-emerald-400 font-bold">[' + topSource.linked_visuals[0].title + ']</span>' : ''}`;
+            const pageNum = topSource.page || 1;
+            const citId = topSource.citation_id || 1;
+            const visualTitle = topSource.linked_visuals ? topSource.linked_visuals[0].title : null;
+
+            pathDisplay.innerHTML = `
+              <button onclick="openASTModal()" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-purple-300 border border-purple-800/60 transition flex items-center gap-1 font-mono">
+                <i data-lucide="folder" class="w-3 h-3"></i> root
+              </button>
+              <span class="text-slate-600">➔</span>
+              <button onclick="openASTModal()" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 border border-blue-800/60 transition flex items-center gap-1 font-mono">
+                <i data-lucide="file-text" class="w-3 h-3"></i> Section (P${pageNum})
+              </button>
+              <span class="text-slate-600">➔</span>
+              <button onclick="openCitationByIndex(${citId})" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1 font-mono">
+                <i data-lucide="align-left" class="w-3 h-3"></i> Para [${citId}]
+              </button>
+              ${visualTitle ? `
+                <span class="text-slate-600">⟷</span>
+                <button onclick="openProofDrawer(ACTIVE_SOURCES[0])" class="px-1.5 py-0.5 rounded bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-700 transition flex items-center gap-1 font-mono font-bold">
+                  <i data-lucide="image" class="w-3 h-3"></i> [${visualTitle}]
+                </button>` : ''}`;
+            
             pathContainer.classList.remove("hidden");
 
             // 3. Linked Visual Sibling Banner
             if (topSource.linked_visuals && topSource.linked_visuals.length > 0) {
                 const vis = topSource.linked_visuals[0];
                 document.getElementById("linked-visual-thumb").src = vis.image_url;
-                document.getElementById("linked-visual-title").innerText = `Resolved: ${vis.title}`;
+                document.getElementById("linked-visual-title").innerText = `Resolved Sibling: ${vis.title}`;
                 visualStrip.classList.remove("hidden");
             }
 
@@ -244,21 +413,28 @@ async function submitQuery() {
             chipsContainer.classList.remove("hidden");
             ACTIVE_SOURCES.forEach(s => {
                 const chipBtn = document.createElement("button");
-                chipBtn.className = "px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-mono flex items-center gap-1 transition";
-                chipBtn.innerHTML = `<span>[${s.citation_id}]</span> <span class="text-slate-400">Page ${s.page}</span>${s.has_visual ? ' 🖼️' : ''}`;
+                chipBtn.className = "px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-700/80 text-[11px] font-mono flex items-center gap-1.5 transition shadow-sm hover:border-emerald-500/50";
+                chipBtn.innerHTML = `<span class="font-bold text-emerald-400">[${s.citation_id}]</span> <span class="text-slate-400">Page ${s.page}</span>${s.has_visual ? ' <span title="Linked Visual Table/Figure">🖼️</span>' : ''}`;
                 chipBtn.onclick = () => openProofDrawer(s);
                 chipsList.appendChild(chipBtn);
             });
         }
 
-        // 5. Plain Baseline Container (Hallucination Radar)
+        // 5. Plain Baseline Container (Hallucination Radar with Markdown Rendering)
         if (compareActive && data.baseline) {
-            baselineContainer.innerHTML = `<div class="whitespace-pre-wrap text-slate-300">${data.baseline}</div>`;
+            baselineContainer.innerHTML = formatBaselineAnswer(data.baseline);
+        } else if (!compareActive) {
+            baselineContainer.innerHTML = `<p class="text-slate-500 italic py-4">Hallucination Radar comparison is currently toggled off.</p>`;
         }
 
+        if (window.lucide) lucide.createIcons();
+
     } catch (err) {
+        clearInterval(timerInterval);
         btn.disabled = false;
-        answerContainer.innerHTML = `<p class="text-red-400">Failed to connect to backend: ${err}</p>`;
+        btn.innerHTML = btnOriginalHtml;
+        if (window.lucide) lucide.createIcons();
+        answerContainer.innerHTML = `<p class="text-rose-400 text-xs">Failed to connect to backend: ${err}</p>`;
     }
 }
 
@@ -266,10 +442,13 @@ function openCitationByIndex(idx) {
     const match = ACTIVE_SOURCES.find(s => s.citation_id === Number(idx));
     if (match) {
         openProofDrawer(match);
+    } else if (ACTIVE_SOURCES.length > 0) {
+        openProofDrawer(ACTIVE_SOURCES[0]);
     }
 }
 
 function openProofDrawer(source) {
+    if (!source) return;
     document.getElementById("drawer-doc-name").innerText = source.filename || "Document";
     document.getElementById("drawer-page-badge").innerText = `Page ${source.page || 1}`;
     document.getElementById("drawer-parent-text").innerText = source.parent_text || source.child_text;
@@ -284,11 +463,14 @@ function openProofDrawer(source) {
         visualSection.classList.add("hidden");
     }
 
-    document.getElementById("proof-drawer").classList.remove("translate-x-full");
+    const drawer = document.getElementById("proof-drawer");
+    drawer.classList.remove("translate-x-full");
+    if (window.lucide) lucide.createIcons();
 }
 
 function closeProofDrawer() {
-    document.getElementById("proof-drawer").classList.add("translate-x-full");
+    const drawer = document.getElementById("proof-drawer");
+    drawer.classList.add("translate-x-full");
 }
 
 // ----------------------------------------------------
@@ -298,6 +480,7 @@ function openASTModal() {
     const modal = document.getElementById("ast-modal");
     modal.classList.remove("hidden");
     loadASTGraph();
+    if (window.lucide) lucide.createIcons();
 }
 
 function closeASTModal() {
@@ -306,55 +489,55 @@ function closeASTModal() {
 
 function loadASTGraph() {
     const container = document.getElementById("ast-tree-container");
-    container.innerHTML = `<p class="text-slate-500 animate-pulse">Loading Document Abstract Syntax Tree...</p>`;
+    container.innerHTML = `<p class="text-slate-500 animate-pulse text-center py-4">Traversing In-Memory AST Structure...</p>`;
 
     fetch("/api/ast")
         .then(r => {
-            if (!r.ok) throw new Error("No active AST loaded");
+            if (!r.ok) throw new Error("Could not load AST");
             return r.json();
         })
-        .then(ast => {
-            document.getElementById("ast-total-nodes").innerText = ast.total_nodes || 0;
-            document.getElementById("ast-total-links").innerText = (ast.cross_modal_links || []).length;
-            renderASTGraph(ast);
+        .then(data => {
+            document.getElementById("ast-total-nodes").innerText = data.total_nodes || 0;
+            document.getElementById("ast-total-links").innerText = data.cross_modal_links || 0;
+            renderASTTree(data);
+            if (window.lucide) lucide.createIcons();
         })
         .catch(err => {
-            container.innerHTML = `<p class="text-amber-400">⚠️ No AST currently active. Please click <strong>⚡ 1-Click Demo</strong> or upload a document first.</p>`;
+            container.innerHTML = `<p class="text-amber-400 text-center py-4">⚠️ No active document loaded. Please click <strong>1-Click Demo</strong> first.</p>`;
         });
 }
 
-function renderASTGraph(ast) {
+function renderASTTree(data) {
     const container = document.getElementById("ast-tree-container");
-    container.innerHTML = "";
+    const nodes = data.nodes || [];
+    if (nodes.length === 0) {
+        container.innerHTML = `<p class="text-slate-500 italic text-center py-4">Tree is empty. Upload a document to build AST hierarchy.</p>`;
+        return;
+    }
 
-    const nodes = ast.nodes || {};
-    const root = nodes[ast.root_id];
+    const sections = nodes.filter(n => n.type === 'SECTION');
+    const paragraphs = nodes.filter(n => n.type === 'PARAGRAPH');
+    const visuals = nodes.filter(n => n.type === 'VISUAL');
 
-    let html = `
-    <div class="space-y-3">
+    let html = `<div class="space-y-3 font-sans">
       <!-- Root Node -->
-      <div class="p-2.5 rounded-lg bg-purple-950/60 border border-purple-800 text-purple-200 flex items-center justify-between">
+      <div class="p-2.5 rounded-xl bg-purple-950/40 border border-purple-800 text-purple-200 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <span class="px-1.5 py-0.5 rounded bg-purple-800 text-[10px] text-white font-bold">H0: ROOT</span>
-          <span class="font-bold">${root ? root.title : "Document Root"}</span>
+          <span class="px-2 py-0.5 rounded bg-purple-900 text-[10px] font-mono font-bold">H0: ROOT</span>
+          <span class="font-bold text-xs">${data.filename || 'Document AST Root'}</span>
         </div>
-        <span class="text-[10px] text-purple-400 font-mono">path: root</span>
+        <span class="text-[10px] text-purple-400 font-mono">${nodes.length} total nodes</span>
       </div>
     `;
-
-    // Group children into sections and visuals
-    const sections = Object.values(nodes).filter(n => n.type === "section");
-    const visuals = Object.values(nodes).filter(n => n.type === "visual");
-    const paragraphs = Object.values(nodes).filter(n => n.type === "paragraph");
 
     sections.forEach(sec => {
         const secParas = paragraphs.filter(p => p.parent_id === sec.id);
         html += `
-        <div class="ml-4 pl-3 border-l-2 border-slate-700 space-y-2">
+        <div class="ml-4 pl-3 border-l-2 border-slate-700/80 space-y-2">
           <!-- Section Node -->
-          <div class="p-2 rounded-lg bg-blue-950/60 border border-blue-800 text-blue-200 flex items-center justify-between">
+          <div class="p-2 rounded-lg bg-blue-950/50 border border-blue-800/80 text-blue-200 flex items-center justify-between">
             <div class="flex items-center gap-2">
-              <span class="px-1.5 py-0.5 rounded bg-blue-800 text-[10px] text-white font-bold">H1/H2: SECTION</span>
+              <span class="px-1.5 py-0.5 rounded bg-blue-900 text-[10px] text-blue-200 font-mono font-bold">H1/H2: SECTION</span>
               <span class="font-semibold text-xs">${sec.title}</span>
             </div>
             <span class="text-[10px] text-blue-400 font-mono">P${sec.page}</span>
@@ -365,9 +548,9 @@ function renderASTGraph(ast) {
             const hasLink = (p.linked_node_ids || []).length > 0;
             html += `
             <div class="ml-4 pl-3 border-l border-slate-800">
-              <div class="p-1.5 rounded bg-slate-900 border ${hasLink ? 'border-cyan-700/80 bg-cyan-950/20' : 'border-slate-800'} text-slate-300 flex items-center justify-between text-[11px]">
-                <span class="truncate max-w-[400px]">${p.text}</span>
-                ${hasLink ? '<span class="px-1.5 py-0.2 rounded bg-cyan-900/80 text-cyan-300 text-[10px] border border-cyan-700">⟷ Sibling Linked</span>' : ''}
+              <div class="p-1.5 rounded-lg bg-slate-900 border ${hasLink ? 'border-cyan-700/80 bg-cyan-950/30' : 'border-slate-800'} text-slate-300 flex items-center justify-between text-[11px]">
+                <span class="truncate max-w-[420px]">${p.text}</span>
+                ${hasLink ? '<span class="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 text-[10px] border border-cyan-700/80 font-mono">⟷ Sibling Linked</span>' : ''}
               </div>
             </div>`;
         });
@@ -379,14 +562,16 @@ function renderASTGraph(ast) {
 
     if (visuals.length > 0) {
         html += `
-        <div class="pt-2 border-t border-slate-800">
-          <p class="text-[10px] uppercase font-bold text-emerald-400 tracking-wider mb-2">Resolved Visual Crops (Halo-Cropped):</p>
+        <div class="pt-3 border-t border-slate-800">
+          <p class="text-[10px] uppercase font-bold text-emerald-400 tracking-wider mb-2 flex items-center gap-1.5">
+            <i data-lucide="image" class="w-3.5 h-3.5"></i> Resolved Visual Leaves (Halo-Cropped):
+          </p>
           <div class="grid grid-cols-2 gap-2">
         `;
         visuals.forEach(v => {
             html += `
-            <div class="p-2 rounded-lg bg-emerald-950/40 border border-emerald-800 flex items-center gap-2">
-              ${v.image_url ? `<img src="${v.image_url}" class="w-10 h-8 object-cover rounded border border-slate-700">` : ''}
+            <div class="p-2 rounded-lg bg-emerald-950/30 border border-emerald-800/60 flex items-center gap-2.5">
+              ${v.image_url ? `<img src="${v.image_url}" class="w-12 h-9 object-cover rounded border border-slate-700 shrink-0">` : ''}
               <div class="overflow-hidden">
                 <p class="text-xs font-bold text-emerald-300 truncate">${v.title}</p>
                 <p class="text-[10px] text-slate-400">Page ${v.page} • ${v.visual_type || 'figure'}</p>
@@ -407,6 +592,7 @@ function openContradictionsModal() {
     const modal = document.getElementById("contradiction-modal");
     modal.classList.remove("hidden");
     loadContradictions();
+    if (window.lucide) lucide.createIcons();
 }
 
 function closeContradictionsModal() {
@@ -415,7 +601,7 @@ function closeContradictionsModal() {
 
 function loadContradictions() {
     const container = document.getElementById("discrepancy-findings-container");
-    container.innerHTML = `<p class="text-slate-500 animate-pulse">Running Cross-Modal AST Audit Scan...</p>`;
+    container.innerHTML = `<p class="text-slate-500 animate-pulse text-center py-4">Running Cross-Modal AST Contradiction Scan...</p>`;
 
     fetch("/api/discrepancies")
         .then(r => {
@@ -429,23 +615,26 @@ function loadContradictions() {
             const badge = document.getElementById("discrepancy-verdict-badge");
             badge.innerText = report.verdict;
             if (report.verdict === "FLAGGED") {
-                badge.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-red-950 text-red-300 border border-red-800";
+                badge.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-rose-950 text-rose-300 border border-rose-800";
             } else {
                 badge.className = "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-950 text-emerald-300 border border-emerald-800";
             }
 
             renderDiscrepancyFindings(report.findings || []);
+            if (window.lucide) lucide.createIcons();
         })
         .catch(err => {
-            container.innerHTML = `<p class="text-amber-400">⚠️ No active document to audit. Please click <strong>⚡ 1-Click Demo</strong> first.</p>`;
+            container.innerHTML = `<p class="text-amber-400 text-center py-4">⚠️ No active document to audit. Please click <strong>1-Click Demo</strong> first.</p>`;
         });
 }
 
 function renderDiscrepancyFindings(findings) {
     const container = document.getElementById("discrepancy-findings-container");
     if (!findings || findings.length === 0) {
-        container.innerHTML = `<div class="p-4 rounded-xl bg-slate-950 border border-slate-800 text-center text-slate-400">
-            <p>✅ All cross-modal pairs align. No discrepancies detected between prose claims and visual tables.</p>
+        container.innerHTML = `<div class="p-6 rounded-xl bg-slate-950 border border-slate-800 text-center text-slate-400">
+            <i data-lucide="shield-check" class="w-8 h-8 mx-auto text-emerald-400 mb-2"></i>
+            <p class="font-semibold text-slate-200">All cross-modal pairs align perfectly.</p>
+            <p class="text-xs text-slate-500 mt-1">No numerical or categorical discrepancies detected between prose claims and visual tables.</p>
         </div>`;
         return;
     }
@@ -454,14 +643,14 @@ function renderDiscrepancyFindings(findings) {
     findings.forEach(f => {
         const isConflict = f.status === "CONTRADICTION";
         const card = document.createElement("div");
-        card.className = `p-4 rounded-xl border ${isConflict ? 'bg-red-950/20 border-red-900/60' : 'bg-slate-950 border-slate-800'} flex flex-col gap-2.5`;
+        card.className = `p-4 rounded-xl border ${isConflict ? 'bg-rose-950/20 border-rose-900/60' : 'bg-slate-950 border-slate-800'} flex flex-col gap-2.5`;
         card.innerHTML = `
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <span class="text-base">${isConflict ? '🚨' : '✅'}</span>
-            <span class="font-bold text-xs ${isConflict ? 'text-red-300' : 'text-slate-200'}">${f.title}</span>
+            <span class="font-bold text-xs ${isConflict ? 'text-rose-300' : 'text-slate-200'}">${f.title}</span>
           </div>
-          <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${isConflict ? 'bg-red-950 text-red-400 border border-red-800' : 'bg-emerald-950 text-emerald-400 border border-emerald-800'}">
+          <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${isConflict ? 'bg-rose-950 text-rose-400 border border-rose-800' : 'bg-emerald-950 text-emerald-400 border border-emerald-800'}">
             ${f.status} (${Math.round((f.confidence || 0.9) * 100)}% Conf)
           </span>
         </div>
@@ -473,12 +662,12 @@ function renderDiscrepancyFindings(findings) {
           </div>
           <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
             <p class="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">Raw Visual Chart Fact:</p>
-            <p class="text-emerald-300 font-mono">"${f.visual_fact}"</p>
+            <p class="text-emerald-300 font-mono font-semibold">"${f.visual_fact}"</p>
           </div>
         </div>
 
         ${f.discrepancy_delta && f.discrepancy_delta !== 'None' ? `
-        <div class="p-2 rounded-lg bg-red-950/40 border border-red-900/40 text-[11px] text-red-200 font-mono">
+        <div class="p-2 rounded-lg bg-rose-950/40 border border-rose-900/40 text-[11px] text-rose-200 font-mono">
           <strong>Audit Delta:</strong> ${f.discrepancy_delta}
         </div>` : ''}
         `;
@@ -487,12 +676,13 @@ function renderDiscrepancyFindings(findings) {
 }
 
 // ----------------------------------------------------
-// MODAL 3: COMPLIANCE AUDIT
+// MODAL 3: COMPLIANCE PRE-FLIGHT AUDIT
 // ----------------------------------------------------
 function openComplianceAuditModal() {
     const modal = document.getElementById("compliance-audit-modal");
     modal.classList.remove("hidden");
     loadComplianceAudit();
+    if (window.lucide) lucide.createIcons();
 }
 
 function closeComplianceAuditModal() {
@@ -501,7 +691,7 @@ function closeComplianceAuditModal() {
 
 function loadComplianceAudit() {
     const container = document.getElementById("audit-checklist-container");
-    container.innerHTML = `<p class="text-slate-500 animate-pulse py-4 text-center">Auditing 7 mandatory controls across AST...</p>`;
+    container.innerHTML = `<p class="text-slate-500 animate-pulse py-6 text-center text-xs">Auditing 7 mandatory controls across AST & LanceDB...</p>`;
 
     fetch("/compliance-audit")
         .then(r => {
@@ -523,7 +713,7 @@ function loadComplianceAudit() {
             container.innerHTML = "";
             data.checklist.forEach(item => {
                 const row = document.createElement("div");
-                row.className = "p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2";
+                row.className = "p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2";
                 
                 let remediationHtml = "";
                 if (item.status === 'GAP' && item.remediation_clause) {
@@ -533,18 +723,18 @@ function loadComplianceAudit() {
                     <div class="mt-2 pt-2 border-t border-slate-800/80">
                       <details class="group cursor-pointer">
                         <summary class="text-[11px] font-semibold text-amber-400 hover:text-amber-300 flex items-center justify-between">
-                          <span>🛠️ Automated Enterprise Remediation Diff (Robin/Ironclad Edge)</span>
+                          <span class="flex items-center gap-1.5"><i data-lucide="git-pull-request" class="w-3.5 h-3.5"></i> Automated Enterprise Remediation Diff (Robin/Ironclad Edge)</span>
                           <span class="text-[10px] text-slate-500 group-open:rotate-180 transition-transform">▼</span>
                         </summary>
-                        <div class="mt-2 space-y-2 bg-slate-900/90 p-2.5 rounded-lg border border-slate-800 text-[11px]">
+                        <div class="mt-2 space-y-2 bg-slate-900/90 p-3 rounded-lg border border-slate-800 text-[11px]">
                           <p class="text-slate-300"><strong class="text-slate-100 font-semibold">Legal Rationale:</strong> ${item.rationale || 'Mandatory compliance control.'}</p>
-                          <div class="p-2 rounded bg-slate-950 font-mono text-[10px] text-emerald-400 overflow-x-auto border border-emerald-950">
+                          <div class="p-2.5 rounded bg-slate-950 font-mono text-[10px] text-emerald-400 overflow-x-auto border border-emerald-950 shadow-inner">
                             <pre class="whitespace-pre-wrap">${diffText}</pre>
                           </div>
                           <div class="flex items-center justify-between pt-1">
                             <span class="text-[10px] text-slate-400 italic">Pre-approved enterprise fallback clause</span>
-                            <button onclick="navigator.clipboard.writeText('${safeClause}'); this.innerText='✅ Copied!'; setTimeout(()=>this.innerText='📋 Copy Approved Clause', 2000)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[10px] transition">
-                              📋 Copy Approved Clause
+                            <button onclick="navigator.clipboard.writeText('${safeClause}'); showToast('Pre-approved clause copied to clipboard!', 'success')" class="px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[10px] transition flex items-center gap-1">
+                              <i data-lucide="copy" class="w-3 h-3"></i> Copy Approved Clause
                             </button>
                           </div>
                         </div>
@@ -558,24 +748,28 @@ function loadComplianceAudit() {
                     <span class="text-base">${item.status === 'PASS' ? '✅' : '⚠️'}</span>
                     <div>
                       <p class="font-bold text-white">${item.control || item.title}</p>
-                      <p class="text-[11px] text-slate-400">${item.finding}</p>
+                      <p class="text-[11px] text-slate-400">${item.category}</p>
                     </div>
                   </div>
-                  <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${item.status === 'PASS' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'}">
-                    ${item.status} (${Math.round(item.confidence * 100)}%)
+                  <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${item.status === 'PASS' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'}">
+                    ${item.status} (${item.confidence}% Conf)
                   </span>
+                </div>
+                <div class="p-2 rounded bg-slate-900 border border-slate-800 text-slate-300 italic text-[11px]">
+                  "${item.excerpt || 'Control missing from active document.'}"
                 </div>
                 ${remediationHtml}`;
                 container.appendChild(row);
             });
+            if (window.lucide) lucide.createIcons();
         })
         .catch(err => {
-            container.innerHTML = `<p class="text-amber-400 py-4 text-center">⚠️ No active document loaded. Please click <strong>⚡ 1-Click Demo</strong> first.</p>`;
+            container.innerHTML = `<p class="text-amber-400 text-center py-4">⚠️ No active document loaded. Please click <strong>1-Click Demo</strong> first.</p>`;
         });
 }
 
 // ----------------------------------------------------
-// VAULT MANAGEMENT
+// KNOWLEDGE VAULT & MULTI-DOC SWITCHING
 // ----------------------------------------------------
 function loadVault() {
     fetch("/vault")
@@ -587,7 +781,7 @@ function loadVault() {
             badge.innerText = `${items.length} Docs`;
 
             if (items.length === 0) {
-                list.innerHTML = `<p class="text-[11px] text-slate-500 italic py-2 text-center">No documents in vault yet.</p>`;
+                list.innerHTML = `<p class="text-[11px] text-slate-500 italic py-3 text-center">No documents in vault yet.</p>`;
                 return;
             }
 
@@ -595,21 +789,39 @@ function loadVault() {
             items.forEach(doc => {
                 const isActive = doc.is_active;
                 const row = document.createElement("div");
-                row.className = `p-2 rounded-lg border flex items-center justify-between text-xs cursor-pointer transition ${isActive ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-200' : 'bg-slate-950 hover:bg-slate-800/60 border-slate-800 text-slate-300'}`;
-                row.onclick = () => selectVaultDoc(doc.doc_id);
+                row.className = `p-2.5 rounded-xl border flex items-center justify-between text-xs transition-all ${
+                    isActive 
+                    ? 'bg-emerald-950/40 border-emerald-500/60 shadow-sm shadow-emerald-950/40' 
+                    : 'bg-slate-950/80 hover:bg-slate-850 border-slate-800 hover:border-slate-700 cursor-pointer'
+                }`;
+
+                row.onclick = () => {
+                    if (!isActive) selectVaultDoc(doc.doc_id, doc.filename);
+                };
+
                 row.innerHTML = `
-                <div class="flex items-center gap-2 truncate">
-                  <span>${isActive ? '🟢' : '📄'}</span>
-                  <span class="truncate font-medium">${doc.filename}</span>
+                <div class="flex items-center gap-2.5 truncate">
+                  <div class="h-6 w-6 rounded-md flex items-center justify-center shrink-0 ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}">
+                    <i data-lucide="${isActive ? 'check-circle' : 'file-text'}" class="w-3.5 h-3.5"></i>
+                  </div>
+                  <div class="truncate">
+                    <p class="truncate font-semibold ${isActive ? 'text-emerald-200' : 'text-slate-300'}">${doc.filename}</p>
+                    <p class="text-[10px] text-slate-500 font-mono">${doc.pages || 1} pages • ${doc.total_chunks || 0} nodes</p>
+                  </div>
                 </div>
-                <span class="text-[10px] text-slate-500 font-mono">${doc.pages}p</span>`;
+                ${isActive 
+                  ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold shrink-0">ACTIVE</span>` 
+                  : `<button class="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition shrink-0">Switch</button>`
+                }`;
+
                 list.appendChild(row);
             });
+            if (window.lucide) lucide.createIcons();
         })
         .catch(() => {});
 }
 
-function selectVaultDoc(docId) {
+function selectVaultDoc(docId, filename = "document") {
     fetch(`/vault/select/${docId}`, { method: "POST" })
         .then(r => r.json())
         .then(data => {
@@ -617,12 +829,16 @@ function selectVaultDoc(docId) {
             if (data.classification) {
                 updateDocBadge(data.classification.label, data.classification.icon);
             }
+            showToast(`Switched active document to ${filename}`, "info");
         });
 }
 
+// ----------------------------------------------------
+// EXPORT AUDIT REPORTS (.MD / .JSON)
+// ----------------------------------------------------
 async function downloadReport(format = "markdown") {
     if (!LAST_QUERY_DATA) {
-        alert("Please ask a question first before exporting an audit report.");
+        showToast("Please ask a question first before exporting an audit report.", "info");
         return;
     }
 
@@ -660,7 +876,21 @@ async function downloadReport(format = "markdown") {
         a.click();
         window.URL.revokeObjectURL(url);
         a.remove();
+        showToast(`Downloaded ${filename}`, "success");
     } catch (err) {
         console.error("Export error:", err);
+        showToast("Failed to export report", "error");
     }
+}
+
+function toggleModel() {
+    fetch("/api/model/toggle", { method: "POST" })
+        .then(r => r.json())
+        .then(data => {
+            const badge = document.getElementById("model-engine-badge");
+            if (badge) badge.innerText = data.model;
+            showToast(`Switched active LLM to ${data.label}`, "info");
+            if (window.lucide) lucide.createIcons();
+        })
+        .catch(() => {});
 }

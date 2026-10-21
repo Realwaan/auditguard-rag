@@ -8,6 +8,13 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Local Marked.js with CDN Fallback -->
+  <script src="/static/marked.min.js"></script>
+  <script>
+    if (typeof marked === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>');
+    }
+  </script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -21,6 +28,23 @@
     }
   </script>
   <style>
+    /* Custom Scrollbars */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #090d16;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1e293b;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #334155;
+    }
+
+    /* AST Animation */
     .ast-link-line {
       stroke-dasharray: 4;
       animation: dash 20s linear infinite;
@@ -28,147 +52,349 @@
     @keyframes dash {
       to { stroke-dashoffset: 1000; }
     }
+
+    /* Markdown Typography Styling - Grounded */
+    .prose-audit {
+      font-size: 0.875rem;
+      line-height: 1.68;
+      color: #e2e8f0;
+    }
+    .prose-audit h1, .prose-audit h2, .prose-audit h3, .prose-audit h4 {
+      color: #ffffff;
+      font-weight: 700;
+      margin-top: 1rem;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.015em;
+    }
+    .prose-audit h1 { font-size: 1.25rem; }
+    .prose-audit h2 { font-size: 1.1rem; }
+    .prose-audit h3 { font-size: 0.95rem; }
+    .prose-audit p {
+      margin-bottom: 0.75rem;
+    }
+    .prose-audit ul {
+      list-style-type: disc;
+      margin-left: 1.25rem;
+      margin-bottom: 0.75rem;
+      padding-left: 0.25rem;
+    }
+    .prose-audit ol {
+      list-style-type: decimal;
+      margin-left: 1.25rem;
+      margin-bottom: 0.75rem;
+      padding-left: 0.25rem;
+    }
+    .prose-audit li {
+      margin-bottom: 0.35rem;
+      padding-left: 0.2rem;
+    }
+    .prose-audit strong {
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .prose-audit em {
+      color: #94a3b8;
+      font-style: italic;
+    }
+    .prose-audit code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.82em;
+      padding: 0.15rem 0.4rem;
+      border-radius: 0.375rem;
+      background-color: #0f172a;
+      border: 1px solid #1e293b;
+      color: #38bdf8;
+    }
+    .prose-audit pre {
+      background-color: #020617;
+      border: 1px solid #1e293b;
+      border-radius: 0.5rem;
+      padding: 0.75rem;
+      overflow-x: auto;
+      margin-bottom: 0.75rem;
+    }
+    .prose-audit pre code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: #34d399;
+    }
+    .prose-audit blockquote {
+      border-left: 3px solid #10b981;
+      padding-left: 0.75rem;
+      color: #94a3b8;
+      font-style: italic;
+      margin-bottom: 0.75rem;
+    }
+    .prose-audit hr {
+      border: 0;
+      border-top: 1px solid #1e293b;
+      margin: 1rem 0;
+    }
+
+    /* Markdown Typography Styling - Baseline (Hallucination Radar) */
+    .prose-baseline {
+      font-size: 0.85rem;
+      line-height: 1.62;
+      color: #94a3b8;
+    }
+    .prose-baseline h1, .prose-baseline h2, .prose-baseline h3, .prose-baseline h4 {
+      color: #f1f5f9;
+      font-weight: 700;
+      margin-top: 0.85rem;
+      margin-bottom: 0.4rem;
+    }
+    .prose-baseline h1 { font-size: 1.15rem; }
+    .prose-baseline h2 { font-size: 1.05rem; }
+    .prose-baseline h3 { font-size: 0.95rem; }
+    .prose-baseline p {
+      margin-bottom: 0.65rem;
+    }
+    .prose-baseline ul {
+      list-style-type: disc;
+      margin-left: 1.25rem;
+      margin-bottom: 0.65rem;
+    }
+    .prose-baseline ol {
+      list-style-type: decimal;
+      margin-left: 1.25rem;
+      margin-bottom: 0.65rem;
+    }
+    .prose-baseline li {
+      margin-bottom: 0.25rem;
+    }
+    .prose-baseline strong {
+      color: #fde68a;
+      font-weight: 600;
+    }
+    .prose-baseline code {
+      font-family: ui-monospace, monospace;
+      font-size: 0.82em;
+      padding: 0.15rem 0.35rem;
+      border-radius: 0.25rem;
+      background-color: #1e1b18;
+      border: 1px solid #451a03;
+      color: #f59e0b;
+    }
+
+    /* Interactive Citation Anchors */
+    .citation-anchor {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.2rem;
+      padding: 0.12rem 0.45rem;
+      margin: 0 0.15rem;
+      border-radius: 0.375rem;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.45);
+      color: #6ee7b7;
+      font-family: ui-monospace, monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      line-height: 1.1;
+      cursor: pointer;
+      transition: all 0.15s ease-in-out;
+      vertical-align: baseline;
+    }
+    .citation-anchor:hover {
+      background: #10b981;
+      color: #ffffff;
+      border-color: #34d399;
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.45);
+      transform: translateY(-1px);
+    }
   </style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased">
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-emerald-500/30 selection:text-emerald-200">
 
   <!-- TOP NAVIGATION HEADER -->
-  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40 px-6 py-3.5 flex items-center justify-between">
+  <header class="border-b border-slate-800/80 bg-slate-900/90 backdrop-blur sticky top-0 z-40 px-5 sm:px-6 py-3 flex items-center justify-between">
     <div class="flex items-center gap-3">
-      <div class="h-9 w-9 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
-        <i data-lucide="shield-check" class="w-5 h-5"></i>
+      <div class="h-10 w-10 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-950/40">
+        <i data-lucide="shield-check" class="w-5 h-5 text-emerald-400"></i>
       </div>
       <div>
-        <div class="flex items-center gap-2">
-          <span class="font-bold text-lg tracking-tight text-white">AuditGuard RAG</span>
-          <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 font-mono">Tree-RAG v2.0</span>
-          <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 font-mono">LanceDB</span>
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-bold text-lg tracking-tight text-white flex items-center gap-1.5">
+            AuditGuard <span class="text-emerald-400 font-extrabold">RAG</span>
+          </span>
+          <span class="text-[11px] px-2.5 py-0.5 rounded-full bg-blue-950/90 border border-blue-500/60 text-blue-300 font-mono font-bold flex items-center gap-1.5 shadow-sm">
+            <span class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
+            Gemma 4 (31B)
+          </span>
+          <span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 font-mono font-medium">Tree-RAG v2.0</span>
+          <span class="text-[11px] px-2 py-0.5 rounded-full bg-purple-950/80 border border-purple-800/60 text-purple-300 font-mono font-medium">LanceDB</span>
         </div>
-        <p class="text-xs text-slate-400">Hierarchical Multimodal Tree-RAG with Just-in-Time Visual Resolution</p>
+        <p class="text-[11px] text-slate-400">Hierarchical Multimodal Tree-RAG with Just-in-Time Visual Resolution • Powered by Google Gemma 4</p>
       </div>
     </div>
 
-    <!-- Center: Ingestion Speedometer & Document Classification -->
-    <div class="hidden md:flex items-center gap-3">
-      <div id="ingest-speed-badge" class="hidden items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950/80 border border-emerald-500/40 text-xs font-mono text-emerald-400 shadow-sm">
+    <!-- Center: LLM Engine, Ingestion Speedometer & Document Classification -->
+    <div class="hidden md:flex items-center gap-2.5">
+      <button onclick="toggleModel()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-950/60 hover:bg-blue-900/60 border border-blue-500/40 hover:border-blue-400 text-xs font-mono text-blue-300 shadow-sm transition cursor-pointer" title="Click to toggle between High-Speed MoE (~3s) and Dense 31B (~28s)">
+        <i data-lucide="cpu" class="w-3.5 h-3.5 text-blue-400"></i>
+        <span>LLM: <strong id="model-engine-badge" class="font-bold text-white">gemma-4-26b-a4b-it</strong></span>
+        <i data-lucide="repeat" class="w-3 h-3 text-blue-400 opacity-70"></i>
+      </button>
+      <div id="ingest-speed-badge" class="hidden items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950/90 border border-emerald-500/30 text-xs font-mono text-emerald-400 shadow-sm">
         <i data-lucide="zap" class="w-3.5 h-3.5 text-emerald-400"></i>
-        <span>Indexed in <strong id="ingest-speed-val">0.05s</strong> (Zero-LLM)</span>
+        <span>Indexed in <strong id="ingest-speed-val" class="font-bold text-white">0.05s</strong> (Zero-LLM)</span>
       </div>
 
-      <div id="doc-badge-container" class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700">
+      <div id="doc-badge-container" class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700/80">
         <span id="doc-badge-icon" class="text-base">📄</span>
         <div class="text-left">
-          <p class="text-[10px] uppercase font-semibold text-slate-400 tracking-wider">Classification</p>
-          <p id="doc-badge-label" class="text-xs font-medium text-emerald-400">No Document Loaded</p>
+          <p class="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Classification</p>
+          <p id="doc-badge-label" class="text-xs font-semibold text-emerald-400 truncate max-w-[170px]">No Document Loaded</p>
         </div>
       </div>
     </div>
 
     <!-- Right: Quick Demo Actions & Innovation Tools -->
     <div class="flex items-center gap-2">
-      <button id="btn-open-ast" onclick="openASTModal()" class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-800/60 transition shadow-sm">
-        <i data-lucide="git-fork" class="w-4 h-4 text-cyan-400"></i>
-        <span>🌲 AST Graph</span>
-      </button>
-      <button id="btn-open-discrepancy" onclick="openContradictionsModal()" class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-700/60 transition shadow-sm">
-        <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-400"></i>
-        <span>⚡ Contradiction Hunter</span>
-      </button>
-      <button id="btn-run-audit" onclick="openComplianceAuditModal()" class="hidden lg:flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition shadow-sm shadow-indigo-900/40">
-        <i data-lucide="clipboard-check" class="w-4 h-4"></i>
-        <span>📋 Pre-Flight</span>
-      </button>
-      <button id="btn-load-sample" onclick="loadSampleDoc()" class="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition shadow-sm shadow-emerald-900/40">
-        <i data-lucide="play" class="w-4 h-4"></i>
-        <span>⚡ 1-Click Demo</span>
+      <!-- Grouped Analysis Tools -->
+      <div class="flex items-center bg-slate-800/60 border border-slate-700/70 rounded-lg p-0.5 gap-0.5">
+        <button id="btn-open-ast" onclick="openASTModal()" class="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-md hover:bg-slate-700/80 text-cyan-300 transition" title="Inspect Document Abstract Syntax Tree">
+          <i data-lucide="git-fork" class="w-3.5 h-3.5 text-cyan-400"></i>
+          <span class="hidden xl:inline">AST Graph</span>
+        </button>
+        <button id="btn-open-discrepancy" onclick="openContradictionsModal()" class="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-md hover:bg-slate-700/80 text-amber-300 transition" title="Check Text Claims vs Visual Table Facts">
+          <i data-lucide="alert-triangle" class="w-3.5 h-3.5 text-amber-400"></i>
+          <span class="hidden xl:inline">Contradiction Hunter</span>
+        </button>
+        <button id="btn-run-audit" onclick="openComplianceAuditModal()" class="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-md hover:bg-slate-700/80 text-indigo-300 transition" title="Run 7-Point Compliance Audit">
+          <i data-lucide="clipboard-check" class="w-3.5 h-3.5 text-indigo-400"></i>
+          <span class="hidden xl:inline">Pre-Flight</span>
+        </button>
+      </div>
+
+      <!-- Primary Action: 1-Click Stage Demo -->
+      <button id="btn-load-sample" onclick="loadSampleDoc()" class="flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition shadow-md shadow-emerald-950/60 hover:shadow-emerald-900/80">
+        <i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i>
+        <span>1-Click Demo</span>
       </button>
     </div>
   </header>
 
   <!-- MAIN DASHBOARD LAYOUT -->
-  <div class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
 
     <!-- LEFT SIDEBAR: INGESTION & STAGE PRESETS (4 Cols) -->
-    <div class="lg:col-span-4 flex flex-col gap-5">
+    <aside class="lg:col-span-4 flex flex-col gap-5">
       
       <!-- Upload Card -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <h2 class="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center gap-2">
-          <i data-lucide="file-up" class="w-4 h-4 text-emerald-400"></i>
-          Compiler-Grade Ingestion
+      <section class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
+        <h2 class="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2.5 flex items-center justify-between">
+          <span class="flex items-center gap-2">
+            <i data-lucide="file-up" class="w-4 h-4 text-emerald-400"></i>
+            Compiler-Grade Ingestion
+          </span>
+          <span class="text-[10px] text-slate-500 font-mono">PDF / TXT / MD</span>
         </h2>
-        
-        <div id="dropzone" class="border-2 border-dashed border-slate-700 hover:border-emerald-500/50 rounded-xl p-5 text-center cursor-pointer transition bg-slate-950/50 group">
+
+        <div id="dropzone" class="border-2 border-dashed border-slate-700/80 hover:border-emerald-500/70 rounded-xl p-4 text-center cursor-pointer transition bg-slate-950/60 hover:bg-slate-950/90 group">
           <input type="file" id="file-input" class="hidden" accept=".pdf,.txt,.md">
-          <i data-lucide="upload-cloud" class="w-8 h-8 mx-auto text-slate-500 group-hover:text-emerald-400 transition mb-2"></i>
-          <p class="text-xs font-medium text-slate-300">Click to upload or drag & drop</p>
-          <p class="text-[11px] text-slate-500 mt-1">Slices AST + extracts visual crops in &lt; 2.0s</p>
+          <i data-lucide="upload-cloud" class="w-7 h-7 mx-auto text-slate-500 group-hover:text-emerald-400 transition mb-1.5"></i>
+          <p class="text-xs font-semibold text-slate-300">Click to upload or drag & drop</p>
+          <p class="text-[11px] text-slate-500 mt-0.5">Slices AST + extracts visual crops in &lt; 2.0s</p>
         </div>
 
         <div id="upload-status" class="mt-3 text-xs hidden">
-          <div class="flex items-center justify-between text-slate-400 mb-1">
-            <span id="upload-filename" class="font-mono truncate max-w-[200px]">filename.pdf</span>
-            <span id="upload-chunks" class="text-emerald-400 font-semibold font-mono">0 nodes</span>
+          <div class="flex items-center justify-between text-slate-300 mb-1 font-mono text-[11px]">
+            <span id="upload-filename" class="truncate max-w-[200px]">filename.pdf</span>
+            <span id="upload-chunks" class="text-emerald-400 font-semibold">0 nodes</span>
           </div>
           <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-            <div id="upload-progress-bar" class="bg-emerald-500 h-full w-full"></div>
+            <div id="upload-progress-bar" class="bg-emerald-500 h-full w-full transition-all duration-300"></div>
           </div>
         </div>
-      </div>
+      </section>
 
       <!-- Enterprise Document Vault -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center justify-between mb-2">
+      <section class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm flex flex-col">
+        <div class="flex items-center justify-between mb-2.5">
           <h2 class="text-xs uppercase font-bold text-slate-400 tracking-wider flex items-center gap-2">
             <i data-lucide="folder-kanban" class="w-4 h-4 text-emerald-400"></i>
             Knowledge Vault
           </h2>
-          <span id="vault-count-badge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">0 Docs</span>
+          <span id="vault-count-badge" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono font-medium">0 Docs</span>
         </div>
-        <div id="vault-list" class="space-y-1.5 max-h-36 overflow-y-auto">
+        
+        <div id="vault-list" class="space-y-2 max-h-44 overflow-y-auto pr-1">
           <p class="text-[11px] text-slate-500 italic py-2 text-center">No documents in vault yet. Upload or load demo.</p>
         </div>
-      </div>
+      </section>
 
       <!-- Presets for Live Stage Rehearsal -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm flex-1">
-        <h2 class="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center gap-2">
+      <section class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm flex-1 flex flex-col">
+        <h2 class="text-xs uppercase font-bold text-slate-400 tracking-wider mb-1 flex items-center gap-2">
           <i data-lucide="play-circle" class="w-4 h-4 text-emerald-400"></i>
           Stage Demo Scenarios
         </h2>
-        <p class="text-xs text-slate-400 mb-3">Pre-engineered queries designed to highlight Cross-Modal AST vs Plain LLM hallucinations:</p>
+        <p class="text-[11px] text-slate-400 mb-3">Engineered prompts comparing Grounded AST vs Plain Gemma 4:</p>
 
-        <div class="flex flex-col gap-2">
-          <button onclick="setQuery(this.innerText)" class="text-left text-xs p-2.5 rounded-lg bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-slate-200 transition">
-            Does the uptime guarantee of 99.9% match the actual September performance in Table 1?
+        <div class="flex flex-col gap-2.5 flex-1">
+          <!-- Scenario 1: Contradiction -->
+          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="Does the uptime guarantee of 99.9% match the actual September performance in Table 1?" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-amber-600/60 transition shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60 flex items-center gap-1">
+                <i data-lucide="alert-triangle" class="w-2.5 h-2.5"></i> CONTRADICTION
+              </span>
+              <span class="text-[10px] text-slate-500 group-hover:text-amber-400 font-mono transition">Run ➔</span>
+            </div>
+            <p class="text-xs text-slate-200 group-hover:text-white leading-snug">Does the 99.9% uptime SLA match Table 1 in Sept?</p>
           </button>
-          <button onclick="setQuery(this.innerText)" class="text-left text-xs p-2.5 rounded-lg bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-slate-200 transition">
-            What is the penalty credit if availability drops below 99.5%?
+
+          <!-- Scenario 2: SLA Penalty -->
+          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="What is the penalty credit if availability drops below 99.5%?" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-indigo-600/60 transition shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 flex items-center gap-1">
+                <i data-lucide="scale" class="w-2.5 h-2.5"></i> SLA PENALTY
+              </span>
+              <span class="text-[10px] text-slate-500 group-hover:text-indigo-400 font-mono transition">Run ➔</span>
+            </div>
+            <p class="text-xs text-slate-200 group-hover:text-white leading-snug">What is the penalty credit if availability drops below 99.5%?</p>
           </button>
-          <button onclick="setQuery(this.innerText)" class="text-left text-xs p-2.5 rounded-lg bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-slate-200 transition">
-            What are the 3 mandatory escalation steps in the security flowchart?
+
+          <!-- Scenario 3: Flowchart Multi-Step -->
+          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="What are the 3 mandatory escalation steps in the security flowchart?" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-cyan-600/60 transition shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 flex items-center gap-1">
+                <i data-lucide="workflow" class="w-2.5 h-2.5"></i> WORKFLOW
+              </span>
+              <span class="text-[10px] text-slate-500 group-hover:text-cyan-400 font-mono transition">Run ➔</span>
+            </div>
+            <p class="text-xs text-slate-200 group-hover:text-white leading-snug">What are the 3 mandatory escalation steps in the security flowchart?</p>
           </button>
-          <button onclick="setQuery(this.innerText)" class="text-left text-xs p-2.5 rounded-lg bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-slate-700 text-red-300 transition">
-            Can a virtual assistant approve a $100,000 wire transfer alone? (Refusal Test)
+
+          <!-- Scenario 4: CRAG Defense Refusal -->
+          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="Can a virtual assistant approve a $100,000 wire transfer alone? (Refusal Test)" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-rose-600/60 transition shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-800/60 flex items-center gap-1">
+                <i data-lucide="shield-alert" class="w-2.5 h-2.5"></i> REFUSAL TEST
+              </span>
+              <span class="text-[10px] text-slate-500 group-hover:text-rose-400 font-mono transition">Run ➔</span>
+            </div>
+            <p class="text-xs text-rose-200/90 group-hover:text-rose-100 leading-snug">Can a virtual assistant approve a $100,000 wire transfer alone?</p>
           </button>
         </div>
-      </div>
-    </div>
+      </section>
+    </aside>
 
     <!-- RIGHT PANEL: INTERACTIVE QUERY & VERIFICATION CONSOLE (8 Cols) -->
-    <div class="lg:col-span-8 flex flex-col gap-5">
+    <section class="lg:col-span-8 flex flex-col gap-5">
       
       <!-- Query Box -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
+      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-sm">
         <div class="flex items-center justify-between mb-2">
           <label for="query-input" class="text-xs uppercase font-bold text-slate-400 tracking-wider flex items-center gap-2">
-            <i data-lucide="message-square" class="w-4 h-4 text-emerald-400"></i>
+            <i data-lucide="search" class="w-4 h-4 text-emerald-400"></i>
             Compliance & Document Audit Query
           </label>
           
           <!-- Side-by-Side Hallucination Radar Toggle -->
           <div class="flex items-center gap-2 text-xs text-slate-300">
-            <span>Hallucination Radar</span>
+            <span class="text-[11px] font-medium text-slate-400">Hallucination Radar</span>
             <label class="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" id="compare-toggle" class="sr-only peer" checked>
               <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
@@ -176,34 +402,45 @@
           </div>
         </div>
 
-        <div class="flex gap-2">
-          <input type="text" id="query-input" placeholder="Ask any question about the uploaded document, SLA clauses, or linked charts..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition">
-          <button id="btn-submit" onclick="submitQuery()" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm rounded-lg flex items-center gap-2 transition shadow-sm shadow-emerald-900/40">
-            <i data-lucide="search" class="w-4 h-4"></i>
+        <div class="flex gap-2 relative">
+          <input type="text" id="query-input" placeholder="Ask any question about the active document, SLA terms, or linked tables/charts..." class="flex-1 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition shadow-inner">
+          <button id="btn-submit" onclick="submitQuery()" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm rounded-lg flex items-center gap-2 transition shadow-md shadow-emerald-950/60 active:scale-95">
+            <i data-lucide="check-circle" class="w-4 h-4"></i>
             <span>Verify</span>
           </button>
         </div>
       </div>
 
       <!-- Traversed AST Path Live Pill -->
-      <div id="ast-path-container" class="hidden p-3 rounded-xl bg-slate-900 border border-cyan-800/40 flex items-center gap-2 text-xs font-mono text-cyan-300 overflow-x-auto">
-        <span class="text-cyan-400 font-bold flex items-center gap-1"><i data-lucide="git-commit" class="w-3.5 h-3.5"></i> AST Path:</span>
-        <span id="ast-path-display">root ➔ Section 2 ➔ Paragraph 2.1 ⟷ [Table 1]</span>
+      <div id="ast-path-container" class="hidden p-3 rounded-xl bg-slate-900/90 border border-cyan-800/40 flex items-center gap-2 text-xs font-mono text-cyan-300 overflow-x-auto shadow-sm">
+        <span class="text-cyan-400 font-bold flex items-center gap-1.5 shrink-0">
+          <i data-lucide="git-commit" class="w-3.5 h-3.5 text-cyan-400"></i>
+          AST Traversed Path:
+        </span>
+        <div id="ast-path-display" class="flex items-center gap-1 text-slate-300 whitespace-nowrap">
+          <!-- Populated dynamically with interactive nodes -->
+        </div>
       </div>
 
       <!-- Linked Visual Sibling Banner -->
-      <div id="linked-visuals-strip" class="hidden p-3.5 rounded-xl bg-slate-900 border border-emerald-500/30 flex items-center justify-between">
+      <div id="linked-visuals-strip" class="hidden p-3 rounded-xl bg-gradient-to-r from-emerald-950/40 to-slate-900 border border-emerald-500/40 flex items-center justify-between shadow-sm">
         <div class="flex items-center gap-3">
-          <img id="linked-visual-thumb" src="" alt="Linked Visual Crop" class="w-16 h-12 object-cover rounded-lg border border-slate-700 cursor-pointer hover:opacity-80 transition" onclick="openProofDrawer(ACTIVE_SOURCES[0])">
+          <div class="relative group cursor-pointer" onclick="openProofDrawer(ACTIVE_SOURCES[0])">
+            <img id="linked-visual-thumb" src="" alt="Linked Visual Crop" class="w-16 h-12 object-cover rounded-lg border border-emerald-500/50 shadow group-hover:scale-105 transition">
+            <div class="absolute inset-0 bg-slate-950/30 group-hover:bg-transparent rounded-lg flex items-center justify-center transition">
+              <i data-lucide="zoom-in" class="w-4 h-4 text-emerald-300 group-hover:scale-110 transition"></i>
+            </div>
+          </div>
           <div>
-            <p class="text-xs font-bold text-emerald-400 flex items-center gap-1">
-              <i data-lucide="image" class="w-3.5 h-3.5"></i>
+            <p class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+              <i data-lucide="image" class="w-3.5 h-3.5 text-emerald-400"></i>
               <span id="linked-visual-title">Linked Visual Sibling Resolved (JIT)</span>
             </p>
-            <p class="text-[11px] text-slate-400">Deterministic symbol link: text claim bound to lossless visual crop without upfront VLM captioning.</p>
+            <p class="text-[11px] text-slate-400">Deterministic symbol link: prose claim bound to lossless visual crop without hallucination.</p>
           </div>
         </div>
-        <button onclick="openProofDrawer(ACTIVE_SOURCES[0])" class="text-xs px-2.5 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition">
+        <button onclick="openProofDrawer(ACTIVE_SOURCES[0])" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition flex items-center gap-1.5">
+          <i data-lucide="maximize-2" class="w-3 h-3"></i>
           Inspect Crop
         </button>
       </div>
@@ -211,59 +448,92 @@
       <!-- DUAL RESULT CARDS (Grounded RAG vs Plain LLM Baseline) -->
       <div class="grid grid-cols-1 md:grid-cols-12 gap-5 flex-1">
         
-        <!-- Grounded AuditGuard Card -->
-        <div id="grounded-card" class="md:col-span-6 bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col shadow-sm">
-          <div class="flex items-center justify-between mb-3 border-b border-slate-800 pb-3">
-            <div class="flex items-center gap-2">
-              <i data-lucide="shield-check" class="w-4 h-4 text-emerald-400"></i>
-              <h3 class="text-sm font-bold text-white">AuditGuard Grounded Finding</h3>
+        <!-- Grounded AuditGuard Card (HERO) -->
+        <div id="grounded-card" class="md:col-span-6 bg-slate-900/90 border border-emerald-500/30 rounded-xl p-5 flex flex-col shadow-lg shadow-emerald-950/20 relative">
+          <!-- Top Accent Glow -->
+          <div class="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-500 rounded-t-xl"></div>
+
+          <!-- Header: Two-Row Clean Layout -->
+          <div class="mb-3 border-b border-slate-800/80 pb-3 flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <div class="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 shrink-0">
+                  <i data-lucide="shield-check" class="w-4 h-4"></i>
+                </div>
+                <h3 class="text-sm font-bold text-white tracking-tight truncate">AuditGuard Grounded Finding</h3>
+              </div>
+              <span id="grounding-badge" class="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono font-semibold border border-slate-700 shrink-0">Awaiting Query</span>
             </div>
-            <div class="flex items-center gap-2">
-              <span id="metrics-badge" class="text-[10px] text-slate-400 font-mono hidden sm:inline">⚡ 0ms</span>
-              <span id="grounding-badge" class="text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono font-medium border border-slate-700">Awaiting Query</span>
+            <div class="flex items-center justify-between text-[11px] font-mono pl-8">
+              <span class="text-emerald-400 font-medium">Gemma 4 (31B) • AST Grounded</span>
+              <span id="metrics-badge" class="text-slate-400 hidden sm:inline">⚡ 0ms</span>
             </div>
           </div>
 
-          <div id="answer-container" class="text-sm text-slate-200 leading-relaxed flex-1">
-            <p class="text-slate-500 italic py-4">Submit a query or click a demo scenario to see defense-grade grounded retrieval with AST citations.</p>
+          <!-- Answer Body -->
+          <div id="answer-container" class="prose-audit leading-relaxed flex-1">
+            <p class="text-slate-500 italic py-6 text-center">Submit a query or click a demo scenario to see defense-grade grounded retrieval with AST citations.</p>
           </div>
 
-          <!-- Citation Chips -->
-          <div id="citation-chips" class="mt-4 pt-3 border-t border-slate-800 hidden">
-            <p class="text-[11px] uppercase font-bold text-slate-400 tracking-wider mb-2">Verified AST Excerpts & Bounding Proof:</p>
+          <!-- Citation Chips Footer -->
+          <div id="citation-chips" class="mt-4 pt-3 border-t border-slate-800/80 hidden">
+            <div class="flex items-center justify-between mb-2">
+              <p class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Verified AST Evidence:</p>
+              <button onclick="downloadReport('markdown')" class="text-[10px] font-mono text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition" title="Export this audit finding to Markdown">
+                <i data-lucide="download" class="w-3 h-3"></i> Export MD
+              </button>
+            </div>
             <div id="chips-list" class="flex flex-wrap gap-2"></div>
           </div>
         </div>
 
         <!-- Plain Gemma 4 Card (Hallucination Radar) -->
-        <div id="baseline-card" class="md:col-span-6 bg-slate-900/60 border border-slate-800/80 rounded-xl p-5 flex flex-col shadow-sm">
-          <div class="flex items-center justify-between mb-3 border-b border-slate-800 pb-3">
-            <div class="flex items-center gap-2">
-              <i data-lucide="radar" class="w-4 h-4 text-amber-400"></i>
-              <h3 class="text-sm font-bold text-slate-200">Hallucination Radar (Plain LLM)</h3>
+        <div id="baseline-card" class="md:col-span-6 bg-slate-900/60 border border-amber-800/40 rounded-xl p-5 flex flex-col shadow-sm relative">
+          <!-- Top Accent Warning Line -->
+          <div class="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-amber-600 via-orange-500 to-amber-700 rounded-t-xl"></div>
+
+          <!-- Header: Two-Row Clean Layout -->
+          <div class="mb-3 border-b border-slate-800/80 pb-3 flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <div class="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 shrink-0">
+                  <i data-lucide="radar" class="w-4 h-4"></i>
+                </div>
+                <h3 class="text-sm font-bold text-slate-200 tracking-tight truncate">Hallucination Radar</h3>
+              </div>
+              <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-950/90 text-amber-300 font-mono border border-amber-700/80 font-bold shrink-0">Plain Gemma 4</span>
             </div>
-            <span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 font-mono border border-amber-800">No RAG Context</span>
+            <div class="flex items-center justify-between text-[11px] font-mono pl-8">
+              <span class="text-amber-400/90 font-medium">Ungrounded Gemma 4 Baseline</span>
+              <span class="text-slate-500 text-[10px]">Zero AST Context</span>
+            </div>
           </div>
 
-          <div id="baseline-container" class="text-sm text-slate-400 leading-relaxed flex-1">
-            <p class="text-slate-500 italic py-4">Shows what ungrounded models guess when they do not have the document context.</p>
+          <!-- Alert Context Ribbon -->
+          <div class="mb-3 px-2.5 py-1.5 rounded-lg bg-amber-950/30 border border-amber-900/40 text-[11px] text-amber-300/80 flex items-center gap-2">
+            <i data-lucide="alert-circle" class="w-3.5 h-3.5 shrink-0 text-amber-400"></i>
+            <span>Ungrounded output: Relies on parametric memory without verified document anchors.</span>
+          </div>
+
+          <div id="baseline-container" class="prose-baseline leading-relaxed flex-1">
+            <p class="text-slate-500 italic py-6 text-center">Shows what ungrounded models guess when they do not have the document context.</p>
           </div>
         </div>
 
       </div>
 
-    </div>
+    </section>
 
-  </div>
+  </main>
 
   <!-- PROOF DRAWER: VISUAL CLAUSE SPOTLIGHT -->
-  <div id="proof-drawer" class="fixed inset-y-0 right-0 w-full sm:w-[480px] bg-slate-900 border-l border-slate-800 shadow-2xl transform translate-x-full transition-transform duration-300 ease-in-out z-50 flex flex-col">
+  <aside id="proof-drawer" class="fixed inset-y-0 right-0 w-full sm:w-[500px] bg-slate-900 border-l border-slate-800 shadow-2xl transform translate-x-full transition-transform duration-300 ease-in-out z-50 flex flex-col">
     <div class="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
       <div class="flex items-center gap-2">
         <i data-lucide="file-search" class="w-4 h-4 text-emerald-400"></i>
         <h3 class="text-sm font-bold text-white">Verified Proof & Visual Context</h3>
       </div>
-      <button onclick="closeProofDrawer()" class="text-slate-400 hover:text-white transition">
+      <button onclick="closeProofDrawer()" class="text-slate-400 hover:text-white transition p-1 rounded hover:bg-slate-800">
         <i data-lucide="x" class="w-5 h-5"></i>
       </button>
     </div>
@@ -278,18 +548,18 @@
       </div>
 
       <div>
-        <p class="text-[11px] uppercase font-bold text-slate-400 tracking-wider mb-1">Parent Paragraph Excerpt</p>
+        <p class="text-[11px] uppercase font-bold text-slate-400 tracking-wider mb-1">Parent Paragraph Excerpt (AST Grounding Anchor)</p>
         <div id="drawer-parent-text" class="p-3.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 leading-relaxed font-sans whitespace-pre-wrap"></div>
       </div>
 
       <div id="drawer-visual-section" class="hidden">
-        <p class="text-[11px] uppercase font-bold text-slate-400 tracking-wider mb-1">Visual Lossless Proof (Halo Crop / Page Spotlight)</p>
-        <div class="rounded-lg overflow-hidden border border-slate-800 bg-slate-950 p-1">
+        <p class="text-[11px] uppercase font-bold text-slate-400 tracking-wider mb-1">Visual Lossless Proof (Halo Crop / Table Spotlight)</p>
+        <div class="rounded-lg overflow-hidden border border-slate-800 bg-slate-950 p-1 shadow-inner">
           <img id="drawer-visual-image" src="" alt="Visual Evidence Spotlight" class="w-full h-auto object-contain rounded">
         </div>
       </div>
     </div>
-  </div>
+  </aside>
 
   <!-- MODAL 1: AST GRAPH EXPLORER (SPLIT-SCREEN TREE VISUALIZER) -->
   <div id="ast-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
@@ -305,7 +575,7 @@
             <p class="text-xs text-slate-400">3-Tier Materialized Hierarchy • Cross-Modal Sibling Links</p>
           </div>
         </div>
-        <button onclick="closeASTModal()" class="text-slate-400 hover:text-white transition">
+        <button onclick="closeASTModal()" class="text-slate-400 hover:text-white transition p-1 rounded hover:bg-slate-800">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -350,7 +620,7 @@
             <p class="text-xs text-slate-400">Compares Author Text Claims vs Raw Visual Chart Facts</p>
           </div>
         </div>
-        <button onclick="closeContradictionsModal()" class="text-slate-400 hover:text-white transition">
+        <button onclick="closeContradictionsModal()" class="text-slate-400 hover:text-white transition p-1 rounded hover:bg-slate-800">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -389,10 +659,10 @@
           </div>
           <div>
             <h3 class="text-sm font-bold text-white tracking-tight">Enterprise Contract Compliance Scorecard</h3>
-            <p class="text-xs text-slate-400">Automated 7-Point Pre-Flight Compliance Scan</p>
+            <p class="text-xs text-slate-400">Automated 7-Point Pre-Flight Compliance Scan with Remediation Diffs</p>
           </div>
         </div>
-        <button onclick="closeComplianceAuditModal()" class="text-slate-400 hover:text-white transition">
+        <button onclick="closeComplianceAuditModal()" class="text-slate-400 hover:text-white transition p-1 rounded hover:bg-slate-800">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -419,6 +689,9 @@
       </div>
     </div>
   </div>
+
+  <!-- FLOATING TOAST NOTIFICATION CONTAINER -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
   <script src="/static/app.js"></script>
   <script>lucide.createIcons();</script>
