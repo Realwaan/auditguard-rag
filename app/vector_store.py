@@ -36,28 +36,28 @@ class LanceVectorStore:
         embeddings_matrix: Optional[np.ndarray] = None,
     ) -> str:
         """
-        Indexes all leaf nodes (paragraphs) and visual nodes into a LanceDB table.
-        Ensures 1:1 vector alignment by computing leaf embeddings directly if shape diverges.
+        Indexes all non-root AST nodes (sections, paragraphs, visuals, tables) into LanceDB.
+        Preserves complete hierarchy across server restarts with 2-pass reconstruction.
         """
-        leaves = [
+        all_nodes = [
             n for n in ast.nodes.values()
-            if n.type in (ASTNodeType.PARAGRAPH, ASTNodeType.VISUAL)
+            if n.type != ASTNodeType.ROOT
         ]
-        if not leaves:
+        if not all_nodes:
             return ""
 
         table_name = self._get_table_name(ast.doc_id)
         
-        # Verify 1:1 vector alignment against actual AST leaves
-        if embeddings_matrix is None or len(embeddings_matrix) != len(leaves):
+        # Verify 1:1 vector alignment against AST nodes
+        if embeddings_matrix is None or len(embeddings_matrix) != len(all_nodes):
             from app.embeddings import embed_texts
-            leaf_texts = [n.text if n.text.strip() else n.title for n in leaves]
-            actual_embeddings = embed_texts(leaf_texts)
+            node_texts = [n.text if n.text.strip() else n.title for n in all_nodes]
+            actual_embeddings = embed_texts(node_texts)
         else:
             actual_embeddings = embeddings_matrix
 
         records = []
-        for idx, node in enumerate(leaves):
+        for idx, node in enumerate(all_nodes):
             vec = actual_embeddings[idx].tolist() if idx < len(actual_embeddings) else [0.0] * 384
             records.append({
                 "id": str(node.id),
@@ -169,12 +169,18 @@ class LanceVectorStore:
     def reconstruct_document_data(self, doc_id: str) -> Optional[Tuple[DocumentAST, List[Dict[str, Any]], np.ndarray]]:
         """
         Reconstructs DocumentAST, chunks, and embeddings matrix from a persisted LanceDB table.
-        Enables knowledge vault rehydration upon server restart without reprocessing source PDFs.
+        Uses a two-pass reconstruction to fully preserve the AST hierarchy (Sections, Paragraphs, Visuals)
+        and parent-child relationships upon restart.
         """
         table_name = self._get_table_name(doc_id)
         try:
             tbl = self.db.open_table(table_name)
-            records = tbl.to_pandas().to_dict(orient="records")
+            if hasattr(tbl, "to_arrow"):
+                records = tbl.to_arrow().to_pylist()
+            elif hasattr(tbl, "to_pandas"):
+                records = tbl.to_pandas().to_dict(orient="records")
+            else:
+                records = tbl.search().to_list()
         except Exception:
             return None
 
@@ -185,6 +191,7 @@ class LanceVectorStore:
         chunks: List[Dict[str, Any]] = []
         vecs: List[Any] = []
 
+        # Pass 1: Instantiate all AST nodes
         for r in records:
             raw_type = str(r.get("node_type", "paragraph"))
             try:
@@ -208,7 +215,7 @@ class LanceVectorStore:
                 visual_type=r.get("visual_type") or None,
                 metadata=meta
             )
-            ast.add_node(node)
+            ast.nodes[node.id] = node
 
             if node_type == ASTNodeType.PARAGRAPH:
                 chunks.append({
@@ -227,6 +234,19 @@ class LanceVectorStore:
                     vecs.append(v)
                 else:
                     vecs.append([0.0] * 384)
+
+        # Pass 2: Restore parent-child relationships and cross-modal edges
+        for node in list(ast.nodes.values()):
+            if node.id == ast.root_id:
+                continue
+            p_id = node.parent_id
+            if p_id and p_id in ast.nodes and p_id != node.id:
+                if node.id not in ast.nodes[p_id].children_ids:
+                    ast.nodes[p_id].children_ids.append(node.id)
+            else:
+                node.parent_id = ast.root_id
+                if node.id not in ast.nodes[ast.root_id].children_ids:
+                    ast.nodes[ast.root_id].children_ids.append(node.id)
 
         if not chunks:
             return None

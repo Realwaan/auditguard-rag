@@ -1,5 +1,6 @@
 import pytest
 import io
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pypdfium2 as pdfium
 
@@ -45,6 +46,46 @@ def test_scanned_pdf_graceful_handling():
     assert "Visual / Scanned Content" in pages[0]["text"]
     assert pages[1]["page"] == 2
 
+
+def test_mixed_pdf_preserves_image_only_pages(monkeypatch):
+    """Verifies that in mixed PDFs (some pages text, some pages scanned/image), textless pages are preserved."""
+    from unittest.mock import patch, MagicMock
+
+    pdf = pdfium.PdfDocument.new()
+    pdf.new_page(width=200, height=200)
+    pdf.new_page(width=200, height=200)
+    bio = io.BytesIO()
+    pdf.save(bio)
+    pdf_bytes = bio.getvalue()
+    pdf.close()
+
+    class MockPage:
+        def __init__(self, text):
+            self._text = text
+        def extract_text(self):
+            return self._text
+
+    mock_reader = MagicMock()
+    mock_reader.pages = [MockPage("Page 1 has SLA terms."), MockPage("")]
+
+    with patch("app.ingest.PdfReader", return_value=mock_reader):
+        pages = extract_pages_from_pdf(pdf_bytes, "mixed_sop.pdf")
+        assert len(pages) == 2
+        assert pages[0]["page"] == 1
+        assert "Page 1 has SLA terms." in pages[0]["text"]
+        assert pages[1]["page"] == 2
+        assert "Visual / Scanned Content" in pages[1]["text"]
+        assert pages[1].get("is_scanned") is True
+
+    # Also verify that when OCR returns text, it is integrated
+    with patch("app.ingest.PdfReader", return_value=mock_reader), \
+         patch("app.ingest.ocr_extract_page_image", return_value="RECOVERED OCR CHART METRICS"):
+        pages_ocr = extract_pages_from_pdf(pdf_bytes, "mixed_sop.pdf")
+        assert len(pages_ocr) == 2
+        assert "RECOVERED OCR CHART METRICS" in pages_ocr[1]["text"]
+        assert pages_ocr[1].get("is_ocr") is True
+
+
 def test_extract_halo_crops_native_cleanup():
     # Create a synthetic PDF and run halo cropping to verify native handles close cleanly
     pdf = pdfium.PdfDocument.new()
@@ -86,9 +127,26 @@ def test_session_isolation_in_audit_and_discrepancy_endpoints():
     assert ast_data["doc_id"] == "sample_enterprise_sop"
 
 def test_get_doc_context_resolution_priority():
+    client.post("/load-sample")
     target_id, vault_entry, retriever, classification, ast = get_doc_context(
         doc_id="sample_enterprise_sop"
     )
     assert target_id == "sample_enterprise_sop"
     assert retriever is not None
     assert ast is not None
+
+    # Strict isolation: invalid explicit doc_id raises 404 instead of silent fallback
+    with pytest.raises(HTTPException) as exc_info:
+        get_doc_context(doc_id="nonexistent_ghost_doc")
+    assert exc_info.value.status_code == 404
+
+    # Strict isolation: registered session pointing to missing document raises 404
+    SESSION_REGISTRY["corrupt_session"] = {"active_doc_id": "deleted_document"}
+    with pytest.raises(HTTPException) as exc_info:
+        get_doc_context(session_id="corrupt_session")
+    assert exc_info.value.status_code == 404
+
+    # API route returns 404 when querying an invalid explicit doc_id
+    res = client.post("/ask", json={"query": "test query", "doc_id": "nonexistent_ghost_doc"})
+    assert res.status_code == 404
+

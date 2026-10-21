@@ -68,10 +68,10 @@ class DocumentAST:
         self.nodes[self.root_id] = root_node
 
     def add_node(self, node: ASTNode, parent_id: Optional[str] = None) -> None:
-        """Add a node and attach to parent if specified."""
+        """Add a node and attach to parent if specified or preserved on node."""
         self.nodes[node.id] = node
-        p_id = parent_id or self.root_id
-        if p_id in self.nodes:
+        p_id = parent_id or node.parent_id or self.root_id
+        if p_id in self.nodes and p_id != node.id:
             node.parent_id = p_id
             if node.id not in self.nodes[p_id].children_ids:
                 self.nodes[p_id].children_ids.append(node.id)

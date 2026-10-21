@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -107,7 +108,9 @@ async def upload_document(file: UploadFile = File(...)):
     t_start = time.perf_counter()
     contents = await file.read()
     filename = file.filename or "uploaded_doc.pdf"
-    doc_id = Path(filename).stem.replace(" ", "_")
+    content_hash = hashlib.sha256(contents).hexdigest()[:8]
+    safe_stem = "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in Path(filename).stem)
+    doc_id = f"{safe_stem}_{content_hash}"
 
     # 1. Multi-Format Document Ingestion Engine (PDF, DOCX, PPTX, TXT, MD)
     ext = Path(filename).suffix.lower()
@@ -152,21 +155,27 @@ async def upload_document(file: UploadFile = File(...)):
     para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
     for c in chunks:
         p_text = c.get("parent_text", "").strip()
-        matched = next((n for n in para_nodes if n.page == c.get("page") and (p_text[:50] in n.text or n.text[:50] in p_text)), None)
-        if not matched and para_nodes:
-            matched = next((n for n in para_nodes if p_text[:50] in n.text or n.text[:50] in p_text), para_nodes[0])
+        matched = None
+        if p_text:
+            matched = next((n for n in para_nodes if n.page == c.get("page") and (p_text[:50] in n.text or n.text[:50] in p_text)), None)
+            if not matched:
+                matched = next((n for n in para_nodes if (p_text[:50] in n.text or n.text[:50] in p_text)), None)
         if matched:
             c["ast_node_id"] = matched.id
             c["materialized_path"] = matched.materialized_path
-            c["linked_node_ids"] = matched.linked_node_ids
+            c["linked_node_ids"] = list(matched.linked_node_ids)
             if matched.linked_node_ids and not c.get("image_url"):
                 v_node = ast.get_node(matched.linked_node_ids[0])
                 if v_node and v_node.image_url:
                     c["image_url"] = v_node.image_url
                     c["has_visual"] = True
         else:
-            c["ast_node_id"] = f"{doc_id}_para_1"
-            c["materialized_path"] = f"root/sec/para_1"
+            # Unmapped chunk: record as unresolved rather than inheriting an arbitrary paragraph or visual links
+            c["ast_node_id"] = None
+            c["materialized_path"] = "unresolved"
+            c["linked_node_ids"] = []
+            if not c.get("has_visual"):
+                c["has_visual"] = False
 
     # 4. Dense Vector Embeddings (Child Sentences)
     child_texts = [c["child_text"] for c in chunks]
@@ -303,11 +312,18 @@ def get_doc_context(doc_id: Optional[str] = None, session_id: Optional[str] = No
     """
     Resolves target doc_id, vault_entry, retriever, classification, and AST.
     Prioritizes per-request doc_id, followed by session-bound doc_id, then active default.
+    Strictly enforces document existence: invalid explicit doc_ids raise 404 immediately
+    to prevent unauthorized silent fallback. Unbound sessions default safely to ACTIVE_DOC_ID.
     """
-    if doc_id and doc_id in DOCUMENT_VAULT:
+    if doc_id:
+        if doc_id not in DOCUMENT_VAULT:
+            raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found in vault.")
         target_doc_id = doc_id
     elif session_id and session_id in SESSION_REGISTRY:
-        target_doc_id = SESSION_REGISTRY[session_id].get("active_doc_id", ACTIVE_DOC_ID)
+        bound_id = SESSION_REGISTRY[session_id].get("active_doc_id")
+        if bound_id and bound_id not in DOCUMENT_VAULT:
+            raise HTTPException(status_code=404, detail=f"Bound document '{bound_id}' not found in vault.")
+        target_doc_id = bound_id or ACTIVE_DOC_ID
     else:
         target_doc_id = ACTIVE_DOC_ID
 
@@ -673,15 +689,18 @@ Either party may terminate this agreement without cause by providing at least 30
         if matched:
             c["ast_node_id"] = matched.id
             c["materialized_path"] = matched.materialized_path
-            c["linked_node_ids"] = matched.linked_node_ids
+            c["linked_node_ids"] = list(matched.linked_node_ids)
             if matched.linked_node_ids and not c.get("image_url"):
                 v_node = ast.get_node(matched.linked_node_ids[0])
                 if v_node and v_node.image_url:
                     c["image_url"] = v_node.image_url
                     c["has_visual"] = True
         else:
-            c["ast_node_id"] = f"{sample_doc_id}_para_1"
-            c["materialized_path"] = f"root/sec_2/{sample_doc_id}_para_1"
+            c["ast_node_id"] = None
+            c["materialized_path"] = "unresolved"
+            c["linked_node_ids"] = []
+            if not c.get("has_visual"):
+                c["has_visual"] = False
 
     DOCUMENT_ASTS[sample_doc_id] = ast
     ACTIVE_CLASSIFICATION = classification

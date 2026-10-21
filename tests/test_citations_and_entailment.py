@@ -78,3 +78,35 @@ def test_sanitize_citations_removes_invalid_and_out_of_range():
     assert "[2]" in clean
     assert "[0]" not in clean
     assert "[99]" not in clean
+
+
+def test_evaluator_honest_claim_evidence_signals():
+    """Verifies that evaluator returns explicit grounding_verdict, heuristic_alignment_score, and claim_evidence_verified."""
+    chunks = [{
+        "parent_text": "Clause 4.1: Wire transfers exceeding $50,000 require written sign-off from CFO and Managing Director.",
+        "child_text": "Wire transfers exceeding $50,000 require CFO sign-off",
+        "dense_score": 0.88
+    }]
+    query = "What is the authorization threshold for wire transfers?"
+
+    res = evaluate_relevance(chunks, query=query)
+    assert res["status"] == "SYNTHESIZE"
+    assert res["grounding_verdict"] == "SUPPORTED"
+    assert res["claim_evidence_verified"] is True
+    assert res["heuristic_alignment_score"] > 0.70
+    assert res["evaluation_method"] == "heuristic_proposition_gate"
+    # Backward compatibility
+    assert res["nli_verdict"] == "ENTAILED"
+
+    # Out of bounds / unverifiable
+    ungrounded_chunks = [{
+        "parent_text": "Company holidays include Thanksgiving and Christmas.",
+        "child_text": "Company holidays include Thanksgiving",
+        "dense_score": 0.15
+    }]
+    ref_res = evaluate_relevance(ungrounded_chunks, query=query)
+    assert ref_res["status"] == "REFUSE"
+    assert ref_res["grounding_verdict"] == "UNVERIFIABLE"
+    assert ref_res["claim_evidence_verified"] is False
+    assert "NEUTRAL" in ref_res["nli_verdict"]
+

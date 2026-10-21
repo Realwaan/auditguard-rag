@@ -1,7 +1,7 @@
 import io
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pypdf import PdfReader
 import pypdfium2 as pdfium
 from app.config import PREVIEWS_DIR
@@ -109,11 +109,26 @@ def clean_text_to_markdown(raw_text: str) -> str:
             cleaned.append(stripped)
     return "\n".join(cleaned)
 
+def ocr_extract_page_image(page_image: Any) -> Optional[str]:
+    """
+    Attempts optical character recognition (OCR) on a rendered page image using pytesseract.
+    Returns extracted text if successful, or None if OCR engine is unavailable or produces no text.
+    """
+    try:
+        import pytesseract
+        text = pytesseract.image_to_string(page_image)
+        if text and text.strip():
+            return text.strip()
+    except Exception:
+        pass
+    return None
+
 def extract_pages_from_pdf(pdf_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
     """
     Extract page-level text and metadata from raw PDF bytes, normalized to structured Markdown.
     Includes automated fallback to pypdfium2 textpages for CID/malformed streams,
-    and supports scanned/image-only PDFs so visual AST leaves can still be extracted.
+    and supports mixed and scanned/image-only PDFs so no pages are dropped and visual AST leaves
+    can still be extracted with optional OCR text extraction.
     """
     pages = []
     total_pdf_pages = 0
@@ -173,14 +188,57 @@ def extract_pages_from_pdf(pdf_bytes: bytes, filename: str) -> List[Dict[str, An
         except Exception as e:
             print(f"pypdfium2 extraction notice: {e}")
 
-    # If completely empty/scanned document (no textual streams on any page):
-    if not pages and total_pdf_pages > 0:
-        for p_num in range(1, total_pdf_pages + 1):
-            pages.append({
-                "filename": filename,
-                "page": p_num,
-                "text": f"Page {p_num} (Visual / Scanned Content)"
-            })
+    # Mixed & Scanned PDF Handler: Ensure no page is ever omitted from the document
+    if total_pdf_pages > 0 and len(pages) < total_pdf_pages:
+        existing_page_nums = {p["page"] for p in pages}
+        try:
+            pdf = pdfium.PdfDocument(pdf_bytes)
+            try:
+                for idx in range(total_pdf_pages):
+                    page_num = idx + 1
+                    if page_num not in existing_page_nums:
+                        page = pdf[idx]
+                        ocr_text = None
+                        try:
+                            pil_img = page.render(scale=2.0).to_pil()
+                            ocr_text = ocr_extract_page_image(pil_img)
+                        except Exception:
+                            ocr_text = None
+                        finally:
+                            if hasattr(page, "close"):
+                                try:
+                                    page.close()
+                                except Exception:
+                                    pass
+
+                        if ocr_text:
+                            pages.append({
+                                "filename": filename,
+                                "page": page_num,
+                                "text": clean_text_to_markdown(ocr_text),
+                                "is_scanned": True,
+                                "is_ocr": True
+                            })
+                        else:
+                            pages.append({
+                                "filename": filename,
+                                "page": page_num,
+                                "text": f"Page {page_num} (Visual / Scanned Content)",
+                                "is_scanned": True,
+                                "is_ocr": False
+                            })
+            finally:
+                pdf.close()
+        except Exception:
+            for page_num in range(1, total_pdf_pages + 1):
+                if page_num not in existing_page_nums:
+                    pages.append({
+                        "filename": filename,
+                        "page": page_num,
+                        "text": f"Page {page_num} (Visual / Scanned Content)",
+                        "is_scanned": True,
+                        "is_ocr": False
+                    })
 
     pages.sort(key=lambda x: x["page"])
     return pages
