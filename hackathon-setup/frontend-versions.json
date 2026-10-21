@@ -1,0 +1,55 @@
+{
+  "note": "Inventory only: no frontend project or npm packages bundled.",
+  "node": "22.17.0",
+  "npm": "10.9.2",
+  "packages": {
+    "vite": {
+      "version": "8.3.4",
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "react": {
+      "version": "19.3.1",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "react-dom": {
+      "version": "19.3.1",
+      "engines": {}
+    },
+    "@assistant-ui/react": {
+      "version": "0.15.30",
+      "engines": {}
+    },
+    "@assistant-ui/react-markdown": {
+      "version": "0.14.23",
+      "engines": {}
+    },
+    "typescript": {
+      "version": "6.0.3",
+      "engines": {
+        "node": ">=14.17"
+      }
+    },
+    "tailwindcss": {
+      "version": "4.3.3",
+      "engines": {}
+    },
+    "@tailwindcss/vite": {
+      "version": "4.3.3",
+      "engines": {}
+    },
+    "@vitejs/plugin-react": {
+      "version": "6.1.2",
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "lucide-react": {
+      "version": "1.60.0",
+      "engines": {}
+    }
+  }
+}

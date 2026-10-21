@@ -8,7 +8,7 @@ and automatic cross-modal sibling hydration.
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import lancedb
 
@@ -154,3 +154,82 @@ class LanceVectorStore:
             results.append(item)
 
         return results
+
+    def get_indexed_tables(self) -> List[str]:
+        """Returns list of table names in LanceDB."""
+        try:
+            if hasattr(self.db, "table_names"):
+                return list(self.db.table_names())
+            elif hasattr(self.db, "list_tables"):
+                return list(self.db.list_tables())
+            return []
+        except Exception:
+            return []
+
+    def reconstruct_document_data(self, doc_id: str) -> Optional[Tuple[DocumentAST, List[Dict[str, Any]], np.ndarray]]:
+        """
+        Reconstructs DocumentAST, chunks, and embeddings matrix from a persisted LanceDB table.
+        Enables knowledge vault rehydration upon server restart without reprocessing source PDFs.
+        """
+        table_name = self._get_table_name(doc_id)
+        try:
+            tbl = self.db.open_table(table_name)
+            records = tbl.to_pandas().to_dict(orient="records")
+        except Exception:
+            return None
+
+        if not records:
+            return None
+
+        ast = DocumentAST(doc_id=doc_id, title=doc_id.replace("_", " "))
+        chunks: List[Dict[str, Any]] = []
+        vecs: List[Any] = []
+
+        for r in records:
+            raw_type = str(r.get("node_type", "paragraph"))
+            try:
+                node_type = ASTNodeType(raw_type)
+            except Exception:
+                node_type = ASTNodeType.PARAGRAPH
+
+            linked_ids = json.loads(r.get("linked_node_ids", "[]")) if isinstance(r.get("linked_node_ids"), str) else (r.get("linked_node_ids") or [])
+            meta = json.loads(r.get("metadata", "{}")) if isinstance(r.get("metadata"), str) else (r.get("metadata") or {})
+
+            node = ASTNode(
+                id=str(r.get("id")),
+                type=node_type,
+                title=str(r.get("title", "")),
+                text=str(r.get("text", "")),
+                page=int(r.get("page", 1)),
+                materialized_path=str(r.get("materialized_path", "")),
+                parent_id=r.get("parent_id") or None,
+                linked_node_ids=linked_ids,
+                image_url=r.get("image_url") or None,
+                visual_type=r.get("visual_type") or None,
+                metadata=meta
+            )
+            ast.add_node(node)
+
+            if node_type == ASTNodeType.PARAGRAPH:
+                chunks.append({
+                    "child_text": node.text,
+                    "parent_text": node.text,
+                    "page": node.page,
+                    "filename": f"{doc_id}.pdf",
+                    "ast_node_id": node.id,
+                    "materialized_path": node.materialized_path,
+                    "linked_node_ids": node.linked_node_ids,
+                    "image_url": node.image_url,
+                    "has_visual": bool(node.image_url)
+                })
+                v = r.get("vector")
+                if v is not None:
+                    vecs.append(v)
+                else:
+                    vecs.append([0.0] * 384)
+
+        if not chunks:
+            return None
+
+        emb_matrix = np.array(vecs, dtype=np.float32)
+        return (ast, chunks, emb_matrix)

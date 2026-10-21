@@ -1,15 +1,13 @@
 """Offline dependency smoke checks. Does not import AuditGuard or call an LLM."""
 import importlib.metadata as metadata
 import io
-import ipaddress
 import json
 import os
 from pathlib import Path
 import platform
-import socket
+import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 os.environ["FASTEMBED_CACHE_PATH"] = str(ROOT / "model-cache")
@@ -123,26 +121,32 @@ def vectors():
 
 
 def main():
-    check("windows_python", runtime)
-    check("dependency_versions", dependencies)
-    # Windows asyncio uses loopback sockets internally; allow those, block remote hosts.
-    original_connect = socket.socket.connect
-    def local_connect(sock, address):
-        host = address[0] if isinstance(address, tuple) else ""
+    checks = {"windows_python": runtime, "dependency_versions": dependencies,
+              "http_dependencies": http_stack, "pdf_rendering": pdf_stack,
+              "office_parsers": office_stack, "offline_embeddings_and_search": vectors}
+    if len(sys.argv) == 3 and sys.argv[1] == "--check":
+        name = sys.argv[2]
+        check(name, checks[name])
+        print(json.dumps(RESULTS[0]))
+        return 0 if RESULTS[0]["ok"] else 1
+    # Separate processes bound native-library hangs and avoid shared initialization state.
+    for name in checks:
+        print(f"Checking {name}...", file=sys.stderr, flush=True)
         try:
-            local = host == "localhost" or ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            local = False
-        if not local:
-            raise RuntimeError("External networking disabled during preflight")
-        return original_connect(sock, address)
-    with patch.object(socket.socket, "connect", local_connect):
-        check("http_dependencies", http_stack)
-        check("pdf_rendering", pdf_stack)
-        check("office_parsers", office_stack)
-        check("offline_embeddings_and_search", vectors)
+            result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--check", name],
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45)
+            parsed = json.loads(result.stdout.strip().splitlines()[-1])
+            if result.returncode != 0:
+                parsed["ok"] = False
+            RESULTS.append(parsed)
+        except subprocess.TimeoutExpired:
+            RESULTS.append({"check": name, "ok": False, "detail": "Exceeded 45 seconds; child process stopped. Check laptop environment or sandbox restrictions."})
+        except (ValueError, IndexError, OSError) as exc:
+            RESULTS.append({"check": name, "ok": False, "detail": f"Check process failed: {type(exc).__name__}"})
     passed = sum(item["ok"] for item in RESULTS)
-    print(json.dumps({"passed": passed, "total": len(RESULTS), "scope": "Setup checks only. No RAG accuracy measurement, application tests, or ALMA call.", "checks": RESULTS}, indent=2))
+    report = {"passed": passed, "total": len(RESULTS), "scope": "Setup checks only. No RAG accuracy measurement, application tests, or ALMA call.", "checks": RESULTS}
+    (ROOT / "READINESS.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2))
     return 0 if passed == len(RESULTS) else 1
 
 

@@ -20,13 +20,13 @@ def test_hybrid_retriever_empty_corpus():
     assert results == []
 
 def test_discrepancy_scanner_empty_ast():
-    """Verify discrepancy scanner on empty AST produces valid report."""
+    """Verify discrepancy scanner on empty AST produces valid report without falsely asserting 100% consistency."""
     empty_ast = DocumentAST(doc_id="empty_test")
     report = scan_ast_for_discrepancies(empty_ast, use_llm=False)
     assert report["total_pairs_audited"] == 0
     assert report["contradictions_count"] == 0
-    assert report["verdict"] == "CONSISTENT"
-    assert report["consistency_score"] == 100.0
+    assert report["verdict"] in ("NO_PAIRS", "UNAUDITED")
+    assert report["consistency_score"] == 0.0
 
 def test_compliance_audit_empty_corpus():
     """Verify pre-flight compliance audit handles empty retriever without crashing."""

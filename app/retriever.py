@@ -59,17 +59,17 @@ class HybridRetriever:
             except Exception:
                 pass
 
-        # Sort indices by highest RRF score
-        sorted_indices = sorted(rrf_map.keys(), key=lambda i: rrf_map[i], reverse=True)[:top_k]
+        # Sort all candidate indices by highest RRF score
+        sorted_indices = sorted(rrf_map.keys(), key=lambda i: rrf_map[i], reverse=True)
 
-        # Deduplicate parent paragraphs if multiple child sentences hit the same parent
+        # Deduplicate parent paragraphs while collecting up to top_k unique paragraphs
         seen_parents = set()
         results = []
         citation_num = 1
 
         for idx in sorted_indices:
             chunk = self.chunks[idx].copy()
-            parent = chunk["parent_text"]
+            parent = chunk.get("parent_text", "")
             if parent in seen_parents:
                 continue
             seen_parents.add(parent)
@@ -80,6 +80,9 @@ class HybridRetriever:
             chunk["rrf_score"] = float(rrf_map[idx])
             results.append(chunk)
             citation_num += 1
+
+            if len(results) >= top_k:
+                break
 
         return results
 

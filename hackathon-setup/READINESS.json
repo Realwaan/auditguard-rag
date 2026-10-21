@@ -1,0 +1,17 @@
+{
+  "checked_date": "2026-10-21",
+  "passed": 4,
+  "total": 6,
+  "scope": "Existing PC under the execution sandbox. Setup checks only; no RAG accuracy, application tests, clean-install test or ALMA call.",
+  "offline_wheels_available": false,
+  "fresh_install_verified": false,
+  "alma_endpoint_verified": false,
+  "checks": [
+    {"check": "windows_python", "ok": true, "detail": "Windows x64, CPython 3.13.5"},
+    {"check": "dependency_versions", "ok": true, "detail": "63 installed package versions match the captured dependency lock"},
+    {"check": "http_dependencies", "ok": false, "detail": "Exceeded 45 seconds; child process stopped. Cause unconfirmed; rerun on laptop."},
+    {"check": "pdf_rendering", "ok": true, "detail": "Synthetic PDF parsed, rasterized and encoded as WebP; OCR not supplied"},
+    {"check": "office_parsers", "ok": true, "detail": "DOCX and PPTX synthetic in-memory round trips"},
+    {"check": "offline_embeddings_and_search", "ok": false, "detail": "Exceeded 45 seconds; child process stopped. Cache files copied and checksummed, but model inference/search not verified."}
+  ]
+}

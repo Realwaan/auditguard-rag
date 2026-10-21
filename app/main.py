@@ -4,7 +4,8 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
@@ -52,9 +53,18 @@ ACTIVE_CLASSIFICATION: dict = {
     "prompt_addon": ""
 }
 
+SESSION_REGISTRY: dict[str, dict] = {}
+
 class QueryRequest(BaseModel):
     query: str
     include_baseline: bool = True
+    doc_id: Optional[str] = None
+    session_id: Optional[str] = None
+    model: Optional[str] = None
+
+class SessionSelectRequest(BaseModel):
+    session_id: str
+    doc_id: str
 
 @app.get("/health")
 def health_check():
@@ -292,12 +302,28 @@ async def export_audit_report(payload: ExportReportRequest):
 @app.post("/query")
 async def ask_question(payload: QueryRequest):
     """
-    Standard JSON endpoint for AuditGuard Q&A.
+    Standard JSON endpoint for AuditGuard Q&A with Session Isolation.
     Returns Grounded Answer, Proof Drawer sources with linked visual crops,
-    CRAG Evaluation, Plain Gemma Baseline, and exact retrieval latency.
+    CRAG Evaluation, Plain Gemma Baseline, citation verification audit, and exact retrieval latency.
     """
     global ACTIVE_RETRIEVER, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
-    if not ACTIVE_RETRIEVER:
+
+    # Resolve document context: per-request doc_id > per-session doc_id > global active doc
+    session_id = payload.session_id
+    req_doc_id = payload.doc_id
+    if req_doc_id and req_doc_id in DOCUMENT_VAULT:
+        target_doc_id = req_doc_id
+    elif session_id and session_id in SESSION_REGISTRY:
+        target_doc_id = SESSION_REGISTRY[session_id].get("active_doc_id", ACTIVE_DOC_ID)
+    else:
+        target_doc_id = ACTIVE_DOC_ID
+
+    vault_entry = DOCUMENT_VAULT.get(target_doc_id)
+    retriever = vault_entry["retriever"] if vault_entry else ACTIVE_RETRIEVER
+    classification = vault_entry["classification"] if vault_entry else ACTIVE_CLASSIFICATION
+    ast = DOCUMENT_ASTS.get(target_doc_id)
+
+    if not retriever:
         raise HTTPException(status_code=400, detail="No document loaded. Please upload a document first.")
 
     query = payload.query.strip()
@@ -308,11 +334,10 @@ async def ask_question(payload: QueryRequest):
 
     # 1. Hybrid RRF Retrieval with Microsecond Benchmarking
     t0 = time.perf_counter()
-    retrieved = ACTIVE_RETRIEVER.retrieve(query, top_k=TOP_K)
+    retrieved = retriever.retrieve(query, top_k=TOP_K)
     retrieval_ms = round((time.perf_counter() - t0) * 1000, 2)
 
     # 2. AST Cross-Modal Sibling Hydration
-    ast = DOCUMENT_ASTS.get(ACTIVE_DOC_ID)
     if ast:
         for chunk in retrieved:
             # Check if chunk has linked visual nodes
@@ -348,10 +373,9 @@ async def ask_question(payload: QueryRequest):
     # Tier 2 AST Whole-Page Escalation:
     # If chunk-level relevance is ambiguous or falls below threshold,
     # climb up the Document AST to scan the entire candidate page(s).
-    if eval_result["status"] == "REFUSE" and ACTIVE_RETRIEVER:
+    if eval_result["status"] == "REFUSE" and retriever:
         candidate_pages = [c.get("page") for c in retrieved if c.get("page")]
-        ast = DOCUMENT_ASTS.get(ACTIVE_DOC_ID)
-        escalated_chunks = ACTIVE_RETRIEVER.escalate_page_scan(query, candidate_pages, ast=ast)
+        escalated_chunks = retriever.escalate_page_scan(query, candidate_pages, ast=ast)
         if escalated_chunks:
             escalated_eval = evaluate_relevance(escalated_chunks, query=query)
             if escalated_eval["status"] != "REFUSE":
@@ -368,20 +392,22 @@ async def ask_question(payload: QueryRequest):
             "answer": eval_result["reason"],
             "sources": [],
             "baseline": plain_baseline,
-            "classification": ACTIVE_CLASSIFICATION,
+            "classification": classification,
             "retrieval_ms": retrieval_ms,
             "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
             "estimated_tokens": 0,
             "tokens": 0,
             "is_fallback": False,
-            "model": get_gemma_model()
+            "model": payload.model or get_gemma_model(),
+            "doc_id": target_doc_id
         }
 
     # 6 & 7. Synthesize Grounded Answer & Hallucination Baseline in PARALLEL (50% Latency Reduction)
-    persona = ACTIVE_CLASSIFICATION.get("prompt_addon", "")
+    persona = classification.get("prompt_addon", "")
+    model_choice = payload.model or get_gemma_model()
 
     async def _fetch_grounded():
-        return await asyncio.to_thread(generate_grounded_answer, query, retrieved, persona)
+        return await asyncio.to_thread(generate_grounded_answer, query, retrieved, persona, model_choice)
 
     async def _fetch_baseline():
         if payload.include_baseline:
@@ -390,16 +416,20 @@ async def ask_question(payload: QueryRequest):
 
     grounded_res, plain_baseline = await asyncio.gather(_fetch_grounded(), _fetch_baseline())
 
+    citation_verification = {}
+    has_multimodal = False
     if isinstance(grounded_res, dict):
         grounded_answer = grounded_res.get("answer", "")
         actual_tokens = grounded_res.get("tokens", 0)
         is_fallback = grounded_res.get("is_fallback", False)
-        model_used = grounded_res.get("model", get_gemma_model())
+        model_used = grounded_res.get("model", model_choice)
+        citation_verification = grounded_res.get("citation_verification", {})
+        has_multimodal = grounded_res.get("has_multimodal_context", False)
     else:
         grounded_answer = str(grounded_res)
         actual_tokens = 0
         is_fallback = False
-        model_used = get_gemma_model()
+        model_used = model_choice
 
     reported_tokens = actual_tokens if actual_tokens > 0 else (0 if is_fallback else estimated_tokens)
     status = "SUCCESS"
@@ -407,6 +437,9 @@ async def ask_question(payload: QueryRequest):
         status = "REFUSE"
         eval_result["status"] = "REFUSE"
         eval_result["badge"] = "⚠️ OUT-OF-BOUNDS (Refused)"
+    elif citation_verification.get("total_citations", 0) > 0 and not citation_verification.get("all_supported", True):
+        status = "CAUTION_UNSUPPORTED_CITATION"
+        eval_result["badge"] = "⚠️ CAUTION: Unverified Citation Grounding"
 
     return {
         "query": query,
@@ -415,24 +448,82 @@ async def ask_question(payload: QueryRequest):
         "answer": grounded_answer,
         "sources": retrieved,
         "baseline": plain_baseline,
-        "classification": ACTIVE_CLASSIFICATION,
+        "classification": classification,
         "retrieval_ms": retrieval_ms,
         "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
         "estimated_tokens": reported_tokens,
         "tokens": reported_tokens,
         "is_fallback": is_fallback,
-        "model": model_used
+        "model": model_used,
+        "doc_id": target_doc_id,
+        "citation_verification": citation_verification,
+        "has_multimodal_context": has_multimodal
     }
 
+@app.post("/session/select")
+def select_session_document(payload: SessionSelectRequest):
+    """Binds an active document specifically to a user/client session without mutating global state."""
+    if payload.doc_id not in DOCUMENT_VAULT:
+        raise HTTPException(status_code=404, detail="Document not found in vault.")
+    SESSION_REGISTRY[payload.session_id] = {
+        "active_doc_id": payload.doc_id,
+        "selected_at": datetime.now().strftime("%H:%M:%S")
+    }
+    doc = DOCUMENT_VAULT[payload.doc_id]
+    return {
+        "ok": True,
+        "session_id": payload.session_id,
+        "active_doc_id": payload.doc_id,
+        "filename": doc["filename"]
+    }
+
+@app.get("/session/{session_id}")
+def get_session_status(session_id: str):
+    """Returns active document and session state for the given session_id."""
+    session_data = SESSION_REGISTRY.get(session_id)
+    if not session_data:
+        return {"session_id": session_id, "active_doc_id": ACTIVE_DOC_ID, "bound": False}
+    return {"session_id": session_id, "active_doc_id": session_data.get("active_doc_id"), "bound": True}
+
 @app.get("/ask-stream")
-async def ask_stream(query: str):
-    """Real-time SSE token streaming endpoint."""
-    global ACTIVE_RETRIEVER, ACTIVE_CLASSIFICATION
-    if not ACTIVE_RETRIEVER:
+async def ask_stream(
+    query: str,
+    doc_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    model: Optional[str] = None
+):
+    """Real-time SSE token streaming endpoint with Session Isolation."""
+    global ACTIVE_RETRIEVER, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
+
+    # Resolve session document
+    if doc_id and doc_id in DOCUMENT_VAULT:
+        target_doc_id = doc_id
+    elif session_id and session_id in SESSION_REGISTRY:
+        target_doc_id = SESSION_REGISTRY[session_id].get("active_doc_id", ACTIVE_DOC_ID)
+    else:
+        target_doc_id = ACTIVE_DOC_ID
+
+    vault_entry = DOCUMENT_VAULT.get(target_doc_id)
+    retriever = vault_entry["retriever"] if vault_entry else ACTIVE_RETRIEVER
+    classification = vault_entry["classification"] if vault_entry else ACTIVE_CLASSIFICATION
+
+    if not retriever:
         return StreamingResponse(iter(["Error: No document loaded."]), media_type="text/plain")
 
-    retrieved = ACTIVE_RETRIEVER.retrieve(query, top_k=TOP_K)
+    retrieved = retriever.retrieve(query, top_k=TOP_K)
     eval_result = evaluate_relevance(retrieved, query=query)
+
+    if eval_result["status"] == "REFUSE":
+        async def refuse_generator():
+            yield eval_result["reason"]
+        return StreamingResponse(refuse_generator(), media_type="text/plain")
+
+    persona = classification.get("prompt_addon", "")
+    model_choice = model or get_gemma_model()
+    return StreamingResponse(
+        stream_grounded_answer(query, retrieved, persona, model_choice),
+        media_type="text/plain"
+    )
 
     if eval_result["status"] == "REFUSE":
         return StreamingResponse(
@@ -622,6 +713,36 @@ async def startup_event():
         print("[AuditGuard RAG] Default Enterprise SLA loaded successfully.")
     except Exception as e:
         print(f"[AuditGuard RAG Startup Error]: {e}")
+
+    # Rehydrate persisted LanceDB tables into the in-memory vault on startup
+    try:
+        tables = LANCE_STORE.get_indexed_tables()
+        for tbl in tables:
+            if tbl.startswith("ast_"):
+                d_id = tbl[len("ast_"):]
+                if d_id not in DOCUMENT_VAULT:
+                    reconstructed = LANCE_STORE.reconstruct_document_data(d_id)
+                    if reconstructed:
+                        r_ast, r_chunks, r_emb = reconstructed
+                        r_retriever = HybridRetriever(r_chunks, r_emb, lance_store=LANCE_STORE, doc_id=d_id)
+                        DOCUMENT_ASTS[d_id] = r_ast
+                        DOCUMENT_VAULT[d_id] = {
+                            "doc_id": d_id,
+                            "filename": f"{d_id}.pdf",
+                            "pages": len(r_ast.get_all_pages()) if hasattr(r_ast, "get_all_pages") else 1,
+                            "total_chunks": len(r_chunks),
+                            "total_ast_nodes": len(r_ast.nodes),
+                            "cross_modal_links": len(r_ast.get_cross_modal_links()),
+                            "indexing_duration_ms": 0.0,
+                            "classification": {"type": "PERSISTED", "label": "Persisted Document", "icon": "💾", "confidence": 1.0, "prompt_addon": ""},
+                            "retriever": r_retriever,
+                            "ast": r_ast,
+                            "chunks": r_chunks,
+                            "uploaded_at": "Rehydrated from LanceDB"
+                        }
+                        print(f"[AuditGuard RAG] Successfully rehydrated '{d_id}' from LanceDB table '{tbl}'.")
+    except Exception as rehydrate_err:
+        print(f"[AuditGuard LanceDB Rehydration Warning]: {rehydrate_err}")
 
 @app.get("/vault")
 def get_vault():

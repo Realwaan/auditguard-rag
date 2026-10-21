@@ -9,8 +9,13 @@ import json
 import re
 from typing import List, Dict, Any, Optional
 from app.ast_builder import DocumentAST, ASTNodeType, ASTNode
-from app.llm import get_openai_client, get_genai_client
-from app.config import LLM_MODEL, USE_GOOGLE_GENAI, GEMINI_API_KEY, get_gemma_model
+from app.llm import (
+    get_openai_client, get_genai_client,
+    load_image_bytes, make_genai_part, make_openai_image_part
+)
+from app.config import (
+    LLM_MODEL, LLM_API_KEY, USE_GOOGLE_GENAI, GEMINI_API_KEY, get_gemma_model
+)
 
 
 def detect_heuristic_discrepancy(text: str, visual_text: str) -> Optional[Dict[str, Any]]:
@@ -80,7 +85,8 @@ def audit_cross_modal_pair(
     # 2. If LLM is available, perform deep verification
     if use_llm:
         system_prompt = """You are AuditGuard Cross-Modal Compliance Auditor.
-Your job is to compare a text claim against a linked visual table or chart description.
+Your job is to compare a text claim against a linked visual table or chart (both the image and its text description).
+Inspect the visual image closely (axis labels, legend, table values, units) to determine if the visual supports the claim.
 Determine if they ALIGN, PARTIALLY ALIGN (CAUTION), or CONTRADICT each other.
 Return ONLY valid JSON matching this schema:
 {
@@ -92,7 +98,7 @@ Return ONLY valid JSON matching this schema:
   "confidence": <float between 0.0 and 1.0>
 }"""
 
-        user_content = f"""TEXT EXCERPT (Paragraph on Page {p_node.page}):
+        user_text = f"""TEXT EXCERPT (Paragraph on Page {p_node.page}):
 "{p_node.text}"
 
 LINKED VISUAL ELEMENT ({v_node.title} on Page {v_node.page}):
@@ -100,15 +106,24 @@ LINKED VISUAL ELEMENT ({v_node.title} on Page {v_node.page}):
 
 Audit the claim against the visual data and output JSON."""
 
-        # Try Google GenAI native Gemma 4
+        # Load actual visual image bytes if available on disk
+        img_tuple = load_image_bytes(v_node.image_url) if v_node.image_url else None
+
+        # Try Google GenAI native Gemma 4 (multimodal)
         if USE_GOOGLE_GENAI and GEMINI_API_KEY:
             try:
                 genai_cli = get_genai_client()
                 if genai_cli:
-                    full_p = f"{system_prompt}\n\n{user_content}"
+                    full_p = f"{system_prompt}\n\n{user_text}"
+                    contents: List[Any] = [full_p]
+                    if img_tuple:
+                        part = make_genai_part(img_tuple[0], img_tuple[1])
+                        if part:
+                            contents.append(part)
+
                     resp = genai_cli.models.generate_content(
                         model=get_gemma_model(),
-                        contents=full_p
+                        contents=contents
                     )
                     if resp and resp.text:
                         raw = resp.text
@@ -121,6 +136,7 @@ Audit the claim against the visual data and output JSON."""
                                     "visual_id": v_node.id,
                                     "page": p_node.page,
                                     "image_url": v_node.image_url,
+                                    "multimodal_verified": bool(img_tuple),
                                     **parsed
                                 }
             except Exception as ge:
@@ -130,11 +146,19 @@ Audit the claim against the visual data and output JSON."""
         if not USE_GOOGLE_GENAI or (LLM_API_KEY and LLM_API_KEY != "local-or-alma-key"):
             try:
                 client = get_openai_client()
+                if img_tuple:
+                    openai_user_content: List[Dict[str, Any]] = [
+                        {"type": "text", "text": user_text},
+                        make_openai_image_part(img_tuple[0], img_tuple[1])
+                    ]
+                else:
+                    openai_user_content = [{"type": "text", "text": user_text}]
+
                 response = client.chat.completions.create(
                     model=LLM_MODEL,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content}
+                        {"role": "user", "content": openai_user_content}
                     ],
                     temperature=0.1,
                     max_tokens=250
@@ -149,6 +173,7 @@ Audit the claim against the visual data and output JSON."""
                         "visual_id": v_node.id,
                         "page": p_node.page,
                         "image_url": v_node.image_url,
+                        "multimodal_verified": bool(img_tuple),
                         **parsed
                     }
             except Exception:
@@ -161,21 +186,23 @@ Audit the claim against the visual data and output JSON."""
             "visual_id": v_node.id,
             "page": p_node.page,
             "image_url": v_node.image_url,
+            "multimodal_verified": False,
             **heuristic
         }
 
-    # Default aligned state
+    # Default aligned state with honest confidence reporting when deep model is offline
     return {
         "paragraph_id": p_node.id,
         "visual_id": v_node.id,
         "page": p_node.page,
         "image_url": v_node.image_url,
+        "multimodal_verified": False,
         "status": "ALIGN",
-        "title": "Cross-Modal Alignment Verified",
+        "title": "Cross-Modal Alignment (Heuristic Pass)",
         "text_claim": p_node.text[:120] + "...",
         "visual_fact": v_node.text[:120] + "...",
-        "discrepancy_delta": "No contradictions detected between prose and chart.",
-        "confidence": 0.95
+        "discrepancy_delta": "No heuristic contradictions detected between prose and chart. Deep vision verification pending multimodal active model.",
+        "confidence": 0.60
     }
 
 
@@ -207,9 +234,11 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
 
     total_pairs = len(findings)
     if total_pairs == 0:
-        consistency_score = 100.0
+        consistency_score = 0.0
+        verdict = "NO_PAIRS"
     else:
         consistency_score = round(((aligned_count + 0.5 * caution_count) / total_pairs) * 100, 1)
+        verdict = "FLAGGED" if contradictions_count > 0 else ("CAUTION" if caution_count > 0 else "CONSISTENT")
 
     return {
         "doc_id": ast.doc_id,
@@ -220,6 +249,6 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
         "aligned_count": aligned_count,
         "consistency_score": consistency_score,
         "score": consistency_score,
-        "verdict": "FLAGGED" if contradictions_count > 0 else ("CAUTION" if caution_count > 0 else "CONSISTENT"),
+        "verdict": verdict,
         "findings": findings
     }
