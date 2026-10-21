@@ -79,3 +79,43 @@ def test_nli_entailment_evaluator():
     assert ref_res["status"] == "REFUSE"
     assert "NEUTRAL" in ref_res["nli_verdict"]
     assert "OUT-OF-BOUNDS" in ref_res["badge"]
+
+
+def test_crag_whole_page_escalation_promotion():
+    from app.ast_builder import DocumentAST, ASTNode, ASTNodeType
+    from app.evaluator import evaluate_relevance
+
+    # 1. Low chunk score initially triggers REFUSE
+    low_chunks = [{"dense_score": 0.32, "page": 1, "child_text": "Initial low match.", "parent_text": "Low match"}]
+    initial_eval = evaluate_relevance(low_chunks)
+    assert initial_eval["status"] == "REFUSE"
+
+    # 2. Build AST with Page 1 containing complete context
+    ast = DocumentAST("doc_escalate_test", "Escalation Test Contract")
+    ast.add_node(ASTNode("p1", ASTNodeType.PARAGRAPH, "Intro", "The service provider agrees to obligations.", 1, "root/p1"))
+    ast.add_node(ASTNode("p2", ASTNodeType.PARAGRAPH, "Cap", "Liability limit and cap shall not exceed 500,000 USD.", 1, "root/p2"))
+
+    # 3. Dummy HybridRetriever with 2 chunks
+    dummy_chunks = [
+        {"parent_text": "The service provider agrees to obligations.", "child_text": "agrees", "page": 1},
+        {"parent_text": "Liability limit and cap shall not exceed 500,000 USD.", "child_text": "Liability limit", "page": 1}
+    ]
+    embeddings = np.array([[0.3, 0.4] + [0.0]*382, [0.35, 0.45] + [0.0]*382], dtype=np.float32)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    retriever = HybridRetriever(dummy_chunks, embeddings)
+
+    # 4. Escalate to whole-page scan for in-bounds query
+    escalated = retriever.escalate_page_scan("What is the liability limit cap?", [1], ast=ast, min_threshold=0.50)
+    assert len(escalated) == 1
+    assert escalated[0]["page"] == 1
+    assert escalated[0]["escalated_from"] == "whole_page_scan"
+    assert "Liability limit and cap" in escalated[0]["parent_text"]
+
+    # 5. Promoted evaluation succeeds with PROMOTED TO PAGE SCAN badge
+    promoted_eval = evaluate_relevance(escalated)
+    assert promoted_eval["status"] == "SYNTHESIZE"
+    assert "PROMOTED TO PAGE SCAN" in promoted_eval["badge"]
+
+    # 6. Out-of-bounds query still returns empty and triggers refusal
+    oob_escalated = retriever.escalate_page_scan("Secret recipe for fried chicken", [1], ast=ast, min_threshold=0.50)
+    assert len(oob_escalated) == 0

@@ -34,13 +34,21 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
 
     # Verified grounding with formal NLI entailment calculation
     entailment_prob = min(0.99, round(top_dense * 1.08, 2))
-    badge_label = f"🛡️ GROUNDED • ENTAILED ({confidence_pct}% Confidence)"
     
+    # Check if promoted via Tier-2 Whole-Page Escalation
+    is_promoted = any(c.get("escalated_from") == "whole_page_scan" for c in retrieved_chunks)
+    if is_promoted:
+        badge_label = f"🛡️ GROUNDED • PROMOTED TO PAGE SCAN ({confidence_pct}% Confidence)"
+        reason_text = f"Verified contextual grounding recovered via Tier-2 AST Whole-Page Escalation (Entailment probability: {entailment_prob})."
+    else:
+        badge_label = f"🛡️ GROUNDED • ENTAILED ({confidence_pct}% Confidence)"
+        reason_text = f"Verified contextual grounding found in source documents (Entailment probability: {entailment_prob})."
+
     return {
         "status": "SYNTHESIZE",
         "confidence": confidence_pct,
         "nli_verdict": "ENTAILED",
         "nli_entailment_prob": entailment_prob,
         "badge": badge_label,
-        "reason": f"Verified contextual grounding found in source documents (Entailment probability: {entailment_prob})."
+        "reason": reason_text
     }

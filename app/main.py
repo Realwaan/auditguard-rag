@@ -32,6 +32,8 @@ app = FastAPI(title="AuditGuard RAG • Hierarchical Multimodal Tree-RAG", versi
 # Mount Static Files (Frontend UI, Visual Page Previews & Lossless Crops)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+if (STATIC_DIR / "assistant" / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assistant" / "assets")), name="assets")
 
 # In-Memory State & Multi-Document Knowledge Vault
 ACTIVE_RETRIEVER: HybridRetriever | None = None
@@ -219,10 +221,23 @@ async def ask_question(payload: QueryRequest):
     query_words = len(query.split())
     estimated_tokens = int((context_words + query_words) * 1.33 + 200)
 
-    # 4. CRAG Relevance Gatekeeper
+    # 4. CRAG Relevance Gatekeeper (Tier 1: Chunk-Level Evaluation)
     eval_result = evaluate_relevance(retrieved)
 
-    # 5. Check for Defense Refusal
+    # Tier 2 AST Whole-Page Escalation:
+    # If chunk-level relevance is ambiguous or falls below threshold (< 0.50),
+    # climb up the Document AST to scan the entire candidate page(s).
+    if eval_result["status"] == "REFUSE" and ACTIVE_RETRIEVER:
+        candidate_pages = [c.get("page") for c in retrieved if c.get("page")]
+        ast = DOCUMENT_ASTS.get(ACTIVE_DOC_ID)
+        escalated_chunks = ACTIVE_RETRIEVER.escalate_page_scan(query, candidate_pages, ast=ast)
+        if escalated_chunks:
+            escalated_eval = evaluate_relevance(escalated_chunks)
+            if escalated_eval["status"] != "REFUSE":
+                retrieved = escalated_chunks
+                eval_result = escalated_eval
+
+    # 5. Check for Defense Refusal (If still unverifiable even after Whole-Page Escalation)
     if eval_result["status"] == "REFUSE":
         plain_baseline = await asyncio.to_thread(call_plain_gemma, query) if payload.include_baseline else ""
         return {
@@ -510,3 +525,12 @@ async def serve_ui():
     if html_path.exists():
         return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
     return HTMLResponse(content="<h1>AuditGuard UI Loading...</h1>")
+
+
+@app.get("/assistant", response_class=HTMLResponse)
+async def serve_assistant_ui():
+    """Serve the modern React Assistant-UI frontend."""
+    html_path = STATIC_DIR / "assistant" / "index.html"
+    if html_path.exists():
+        return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+    return HTMLResponse(content="h1>Assistant UI not found.</h1>", status_code=404)

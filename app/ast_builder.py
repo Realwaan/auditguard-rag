@@ -127,6 +127,18 @@ class DocumentAST:
                     })
         return links
 
+    def get_all_pages(self) -> List[int]:
+        """Returns sorted list of all unique page numbers in AST."""
+        return sorted(list({n.page for n in self.nodes.values() if n.page}))
+
+    def get_page_text(self, page: int) -> str:
+        """Aggregates all paragraph and section text on a specific page."""
+        page_nodes = sorted(
+            [n for n in self.nodes.values() if n.page == page and n.text and n.type != ASTNodeType.VISUAL],
+            key=lambda x: x.id
+        )
+        return "\n\n".join(n.text.strip() for n in page_nodes if n.text.strip())
+
     def to_dict(self) -> Dict[str, Any]:
         """Full serializable dictionary for API responses & UI graph rendering."""
         return {

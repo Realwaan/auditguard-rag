@@ -13,7 +13,7 @@ Enterprises and remote operations teams waste hundreds of hours cross-referencin
 2. **Collision-Bounded Halo Cropper**: Expands visual bounding boxes by 12% outward padding to capture axis units (`$ in Millions`) and chart legends without clipping, bounded by page margins and saved as lossless WebP crops.
 3. **3-Tier Cross-Modal Linker**: Wires bidirectional sibling pointers between citing text and chart visuals using exact regex symbols (`Figure 1`, `Table II`), spatial adjacency fallback, and parent section association.
 4. **Cross-Modal Contradiction Hunter**: Detects discrepancies between author prose claims (*"Uptime guarantee of 99.9%"*) and linked visual evidence (*"Table 1 shows 98.2% breach"*).
-5. **Epistemic Humility (Refusal over Hallucination)**: When query relevance drops below threshold ($\tau = 0.50$), the Corrective RAG (CRAG) gatekeeper triggers a defense refusal (`⚠️ OUT-OF-BOUNDS`) rather than fabricating facts.
+5. **2-Tier Epistemic Humility (CRAG Gatekeeper with Whole-Page Promotion)**: When leaf-chunk relevance is ambiguous or falls below threshold (tau = 0.50), AuditGuard climbs the Document AST to **Whole-Page Scanning** to recover multi-paragraph context. If even the full page cannot verify the query (< 0.50), it strictly triggers a defense refusal (OUT-OF-BOUNDS) rather than fabricating facts.
 6. **Embedded In-Process LanceDB Engine**: Columnar vector storage powered by Rust and Apache Arrow with sub-5ms retrieval and zero external Docker or database dependencies.
 
 ---
@@ -47,12 +47,17 @@ Enterprises and remote operations teams waste hundreds of hours cross-referencin
         │
         ▼
 [ CRAG Relevance Gatekeeper ]
-  Confidence < 0.50?
-   ├── YES ──► ⚠️ OUT-OF-BOUNDS REFUSAL (0% Hallucination)
-   └── NO  ──► Send Grounded Context + Domain Persona
-                       │
-                       ▼
-           [ Gemma 4 LLM Inference ]
+  Tier 1: Chunk Confidence < 0.50?
+   ├── NO  ──► Send Grounded Context + Domain Persona (Direct Match)
+   └── YES ──► 🔄 Escalate to Whole-Page / Parent-Section Scan
+                     │
+                     ▼
+               Tier 2: Whole-Page Relevance < 0.50?
+                ├── NO  ──► 🛡️ PROMOTED TO PAGE SCAN (Synthesize with Full Page)
+                └── YES ──► ⚠️ OUT-OF-BOUNDS REFUSAL (Defense Refusal Triggered!)
+                                    │
+                                    ▼
+                        [ Gemma 4 LLM Inference ]
                        │
                        ▼
              [ Split-Screen UI ]
@@ -82,7 +87,7 @@ Click **"Load Sample SOP"** in the top navigation bar to instantly index a sampl
 ---
 
 ## 🧪 Testing
-Run the complete automated test suite (23/23 passing):
+Run the complete automated test suite (27/27 passing):
 ```powershell
 pytest tests -v
 ```
