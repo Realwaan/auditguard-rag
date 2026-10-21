@@ -165,10 +165,7 @@ async def _ingest_document_into_vault(
     embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
 
     # 4. Index AST Leaves directly into LanceDB (In-Process Columnar Vector Engine)
-    try:
-        await asyncio.to_thread(LANCE_STORE.index_ast, ast)
-    except Exception as e:
-        print(f"LanceDB indexing warning: {e}")
+    await asyncio.to_thread(LANCE_STORE.index_ast, ast)
 
     # 5. Initialize Hybrid RRF Retriever backed by LanceDB vector engine
     retriever = HybridRetriever(chunks, embeddings_matrix, lance_store=LANCE_STORE, doc_id=doc_id)
@@ -446,7 +443,7 @@ def execute_rag_retrieval_and_eval(
     eval_result = evaluate_relevance(retrieved, query=query)
 
     # Tier 2 AST Whole-Page Escalation
-    if eval_result["status"] == "REFUSE" and retriever:
+    if eval_result["status"] == "REFUSE" and retriever and not any(c.get("visual_scan_incomplete") for c in retrieved):
         candidate_pages = [c.get("page") for c in retrieved if c.get("page")]
         escalated_chunks = retriever.escalate_page_scan(query, candidate_pages, ast=ast)
         if escalated_chunks:
@@ -650,9 +647,8 @@ async def ask_stream(
         return StreamingResponse(refuse_generator(), media_type="text/plain")
 
     persona = classification.get("prompt_addon", "")
-    model_choice = model or get_default_model()
     return StreamingResponse(
-        iterate_in_threadpool(stream_grounded_answer(clean_query, retrieved, persona, model_choice)),
+        iterate_in_threadpool(stream_grounded_answer(clean_query, retrieved, persona, model)),
         media_type="text/plain"
     )
 

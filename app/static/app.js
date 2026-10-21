@@ -3,7 +3,40 @@
 let ACTIVE_SOURCES = [];
 let LAST_QUERY_DATA = null;
 
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[char]));
+}
+
+function safeMarkdown(markdownText) {
+    const template = document.createElement("template");
+    template.innerHTML = window.marked?.parse
+        ? window.marked.parse(String(markdownText))
+        : escapeHtml(markdownText).replace(/\n/g, "<br>");
+    const allowed = new Set(["P", "BR", "STRONG", "B", "EM", "I", "UL", "OL", "LI", "BLOCKQUOTE", "CODE", "PRE", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "H1", "H2", "H3", "H4", "H5", "H6", "A", "HR", "DEL"]);
+    for (const element of [...template.content.querySelectorAll("*")]) {
+        if (!allowed.has(element.tagName)) {
+            element.replaceWith(document.createTextNode(element.textContent || ""));
+            continue;
+        }
+        const href = element.getAttribute("href");
+        for (const attr of [...element.attributes]) element.removeAttribute(attr.name);
+        if (element.tagName === "A" && href && /^(https?:\/\/|#)/i.test(href)) {
+            element.setAttribute("href", href);
+            element.setAttribute("rel", "noopener noreferrer");
+        }
+    }
+    return template.innerHTML;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+    document.addEventListener("click", (event) => {
+        const citation = event.target.closest?.("button[data-citation-id]");
+        if (citation) openCitationByIndex(Number(citation.dataset.citationId));
+        const copy = event.target.closest?.("button[data-copy-clause]");
+        if (copy) navigator.clipboard.writeText(copy.dataset.copyClause);
+    });
     setupUploadHandlers();
     setupCompareToggle();
     setupKeyboardShortcuts();
@@ -51,7 +84,7 @@ function showToast(message, type = "success") {
                  type === "info"  ? "info" : "check-circle";
 
     toast.className = `flex items-center gap-2.5 px-4 py-3 rounded-xl border shadow-xl backdrop-blur-md text-xs font-medium pointer-events-auto transition-all duration-300 transform translate-y-2 opacity-0 ${bgClass}`;
-    toast.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4 shrink-0"></i> <span>${message}</span>`;
+    toast.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4 shrink-0"></i> <span>${escapeHtml(message)}</span>`;
 
     container.appendChild(toast);
     if (window.lucide) lucide.createIcons();
@@ -240,27 +273,33 @@ function setupCompareToggle() {
 // ----------------------------------------------------
 function formatAuditAnswer(markdownText) {
     if (!markdownText) return "";
-    let html = "";
-    if (window.marked && typeof window.marked.parse === "function") {
-        html = window.marked.parse(markdownText);
-    } else {
-        html = markdownText.replace(/\n/g, "<br>");
+    const template = document.createElement("template");
+    template.innerHTML = safeMarkdown(markdownText);
+    const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    for (const node of textNodes) {
+        const fragment = document.createDocumentFragment();
+        let end = 0;
+        for (const match of node.textContent.matchAll(/\[(\d+)\]/g)) {
+            fragment.append(document.createTextNode(node.textContent.slice(end, match.index)));
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "citation-anchor";
+            button.dataset.citationId = match[1];
+            button.textContent = match[0];
+            fragment.append(button);
+            end = match.index + match[0].length;
+        }
+        fragment.append(document.createTextNode(node.textContent.slice(end)));
+        node.replaceWith(fragment);
     }
-
-    // Convert [1], [2], [10] citation tokens into interactive Proof Drawer buttons
-    html = html.replace(/\[(\d+)\]/g, (match, p1) => {
-        return `<button type="button" onclick="openCitationByIndex(${p1})" class="citation-anchor" title="View Verified AST Proof for Citation [${p1}]"><span>[${p1}]</span></button>`;
-    });
-
-    return html;
+    return template.innerHTML;
 }
 
 function formatBaselineAnswer(markdownText) {
     if (!markdownText) return `<p class="text-slate-500 italic py-4">No baseline response received.</p>`;
-    if (window.marked && typeof window.marked.parse === "function") {
-        return window.marked.parse(markdownText);
-    }
-    return markdownText.replace(/\n/g, "<br>");
+    return safeMarkdown(markdownText);
 }
 
 // ----------------------------------------------------
@@ -345,7 +384,7 @@ async function submitQuery() {
         if (!response.ok) {
             answerContainer.innerHTML = `<div class="p-4 rounded-xl bg-rose-950/40 border border-rose-900 text-rose-200 text-xs">
                 <p class="font-bold flex items-center gap-1.5 mb-1"><i data-lucide="alert-circle" class="w-4 h-4"></i> Query Error</p>
-                <p>${data.detail || "Error querying document intelligence engine"}</p>
+                <p>${escapeHtml(data.detail || "Error querying document intelligence engine")}</p>
             </div>`;
             if (window.lucide) lucide.createIcons();
             return;
@@ -361,9 +400,9 @@ async function submitQuery() {
                   <i data-lucide="shield-alert" class="w-5 h-5 text-rose-400"></i>
                   <span>${data.is_fallback ? "MODEL UNAVAILABLE" : "ANSWER UNVERIFIABLE"}</span>
                 </div>
-                <p class="text-xs leading-relaxed mb-2">${data.answer}</p>
+                <p class="text-xs leading-relaxed mb-2">${escapeHtml(data.answer)}</p>
                 <div class="p-2 rounded bg-rose-950/80 border border-rose-900 text-[11px] font-mono text-rose-300">
-                  ${data.evaluation.reason || "The answer could not be verified against the retrieved excerpts."}
+                  ${escapeHtml(data.evaluation.reason || "The answer could not be verified against the retrieved excerpts.")}
                 </div>
               </div>`;
         } else {
@@ -402,7 +441,7 @@ async function submitQuery() {
               ${visualTitle ? `
                 <span class="text-slate-600">⟷</span>
                 <button onclick="openProofDrawer(ACTIVE_SOURCES[0])" class="px-1.5 py-0.5 rounded bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-700 transition flex items-center gap-1 font-mono font-bold">
-                  <i data-lucide="image" class="w-3 h-3"></i> [${visualTitle}]
+                  <i data-lucide="image" class="w-3 h-3"></i> [${escapeHtml(visualTitle)}]
                 </button>` : ''}`;
             
             pathContainer.classList.remove("hidden");
@@ -440,7 +479,7 @@ async function submitQuery() {
         btn.disabled = false;
         btn.innerHTML = btnOriginalHtml;
         if (window.lucide) lucide.createIcons();
-        answerContainer.innerHTML = `<p class="text-rose-400 text-xs">Failed to connect to backend: ${err}</p>`;
+        answerContainer.innerHTML = `<p class="text-rose-400 text-xs">Failed to connect to backend: ${escapeHtml(err)}</p>`;
     }
 }
 
@@ -531,7 +570,7 @@ function renderASTTree(data) {
       <div class="p-2.5 rounded-xl bg-purple-950/40 border border-purple-800 text-purple-200 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <span class="px-2 py-0.5 rounded bg-purple-900 text-[10px] font-mono font-bold">H0: ROOT</span>
-          <span class="font-bold text-xs">${data.filename || 'Document AST Root'}</span>
+          <span class="font-bold text-xs">${escapeHtml(data.filename || 'Document AST Root')}</span>
         </div>
         <span class="text-[10px] text-purple-400 font-mono">${nodes.length} total nodes</span>
       </div>
@@ -545,7 +584,7 @@ function renderASTTree(data) {
           <div class="p-2 rounded-lg bg-blue-950/50 border border-blue-800/80 text-blue-200 flex items-center justify-between">
             <div class="flex items-center gap-2">
               <span class="px-1.5 py-0.5 rounded bg-blue-900 text-[10px] text-blue-200 font-mono font-bold">H1/H2: SECTION</span>
-              <span class="font-semibold text-xs">${sec.title}</span>
+              <span class="font-semibold text-xs">${escapeHtml(sec.title)}</span>
             </div>
             <span class="text-[10px] text-blue-400 font-mono">P${sec.page}</span>
           </div>
@@ -556,7 +595,7 @@ function renderASTTree(data) {
             html += `
             <div class="ml-4 pl-3 border-l border-slate-800">
               <div class="p-1.5 rounded-lg bg-slate-900 border ${hasLink ? 'border-cyan-700/80 bg-cyan-950/30' : 'border-slate-800'} text-slate-300 flex items-center justify-between text-[11px]">
-                <span class="truncate max-w-[420px]">${p.text}</span>
+                <span class="truncate max-w-[420px]">${escapeHtml(p.text)}</span>
                 ${hasLink ? '<span class="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 text-[10px] border border-cyan-700/80 font-mono">⟷ Sibling Linked</span>' : ''}
               </div>
             </div>`;
@@ -578,10 +617,10 @@ function renderASTTree(data) {
         visuals.forEach(v => {
             html += `
             <div class="p-2 rounded-lg bg-emerald-950/30 border border-emerald-800/60 flex items-center gap-2.5">
-              ${v.image_url ? `<img src="${v.image_url}" class="w-12 h-9 object-cover rounded border border-slate-700 shrink-0">` : ''}
+              ${v.image_url ? `<img src="${escapeHtml(v.image_url)}" class="w-12 h-9 object-cover rounded border border-slate-700 shrink-0">` : ''}
               <div class="overflow-hidden">
-                <p class="text-xs font-bold text-emerald-300 truncate">${v.title}</p>
-                <p class="text-[10px] text-slate-400">Page ${v.page} • ${v.visual_type || 'figure'}</p>
+                <p class="text-xs font-bold text-emerald-300 truncate">${escapeHtml(v.title)}</p>
+                <p class="text-[10px] text-slate-400">Page ${v.page} • ${escapeHtml(v.visual_type || 'figure')}</p>
               </div>
             </div>`;
         });
@@ -655,27 +694,27 @@ function renderDiscrepancyFindings(findings) {
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <span class="text-base">${isConflict ? '🚨' : '✅'}</span>
-            <span class="font-bold text-xs ${isConflict ? 'text-rose-300' : 'text-slate-200'}">${f.title}</span>
+            <span class="font-bold text-xs ${isConflict ? 'text-rose-300' : 'text-slate-200'}">${escapeHtml(f.title)}</span>
           </div>
           <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${isConflict ? 'bg-rose-950 text-rose-400 border border-rose-800' : 'bg-emerald-950 text-emerald-400 border border-emerald-800'}">
-            ${f.status} (${Math.round((f.confidence || 0.9) * 100)}% Conf)
+            ${escapeHtml(f.status)} (${Math.round((f.confidence ?? 0) * 100)}% Conf)
           </span>
         </div>
 
         <div class="grid grid-cols-2 gap-3 mt-1 text-xs">
           <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
             <p class="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">Author Prose Claim:</p>
-            <p class="text-slate-200 italic">"${f.text_claim}"</p>
+            <p class="text-slate-200 italic">"${escapeHtml(f.text_claim)}"</p>
           </div>
           <div class="p-2.5 rounded-lg bg-slate-900 border border-slate-800">
             <p class="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1">Raw Visual Chart Fact:</p>
-            <p class="text-emerald-300 font-mono font-semibold">"${f.visual_fact}"</p>
+            <p class="text-emerald-300 font-mono font-semibold">"${escapeHtml(f.visual_fact)}"</p>
           </div>
         </div>
 
         ${f.discrepancy_delta && f.discrepancy_delta !== 'None' ? `
         <div class="p-2 rounded-lg bg-rose-950/40 border border-rose-900/40 text-[11px] text-rose-200 font-mono">
-          <strong>Audit Delta:</strong> ${f.discrepancy_delta}
+          <strong>Audit Delta:</strong> ${escapeHtml(f.discrepancy_delta)}
         </div>` : ''}
         `;
         container.appendChild(card);
@@ -724,8 +763,8 @@ function loadComplianceAudit() {
                 
                 let remediationHtml = "";
                 if (item.status === 'GAP' && item.remediation_clause) {
-                    const diffText = (item.redline_diff || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-                    const safeClause = (item.remediation_clause || "").replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                    const diffText = escapeHtml(item.redline_diff || "");
+                    const safeClause = escapeHtml(item.remediation_clause || "");
                     remediationHtml = `
                     <div class="mt-2 pt-2 border-t border-slate-800/80">
                       <details class="group cursor-pointer">
@@ -734,13 +773,13 @@ function loadComplianceAudit() {
                           <span class="text-[10px] text-slate-500 group-open:rotate-180 transition-transform">▼</span>
                         </summary>
                         <div class="mt-2 space-y-2 bg-slate-900/90 p-3 rounded-lg border border-slate-800 text-[11px]">
-                          <p class="text-slate-300"><strong class="text-slate-100 font-semibold">Legal Rationale:</strong> ${item.rationale || 'Mandatory compliance control.'}</p>
+                          <p class="text-slate-300"><strong class="text-slate-100 font-semibold">Legal Rationale:</strong> ${escapeHtml(item.rationale || 'Mandatory compliance control.')}</p>
                           <div class="p-2.5 rounded bg-slate-950 font-mono text-[10px] text-emerald-400 overflow-x-auto border border-emerald-950 shadow-inner">
                             <pre class="whitespace-pre-wrap">${diffText}</pre>
                           </div>
                           <div class="flex items-center justify-between pt-1">
                             <span class="text-[10px] text-slate-400 italic">Pre-approved enterprise fallback clause</span>
-                            <button onclick="navigator.clipboard.writeText('${safeClause}'); showToast('Pre-approved clause copied to clipboard!', 'success')" class="px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[10px] transition flex items-center gap-1">
+                            <button data-copy-clause="${safeClause}" class="px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[10px] transition flex items-center gap-1">
                               <i data-lucide="copy" class="w-3 h-3"></i> Copy Approved Clause
                             </button>
                           </div>
@@ -754,16 +793,16 @@ function loadComplianceAudit() {
                   <div class="flex items-center gap-2.5">
                     <span class="text-base">${item.status === 'PASS' ? '✅' : '⚠️'}</span>
                     <div>
-                      <p class="font-bold text-white">${item.control || item.title}</p>
-                      <p class="text-[11px] text-slate-400">${item.category}</p>
+                      <p class="font-bold text-white">${escapeHtml(item.control || item.title)}</p>
+                      <p class="text-[11px] text-slate-400">${escapeHtml(item.category)}</p>
                     </div>
                   </div>
                   <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${item.status === 'PASS' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'}">
-                    ${item.status} (${item.confidence}% Conf)
+                    ${escapeHtml(item.status)} (${item.confidence}% Conf)
                   </span>
                 </div>
                 <div class="p-2 rounded bg-slate-900 border border-slate-800 text-slate-300 italic text-[11px]">
-                  "${item.excerpt || item.clause_excerpt || 'Control missing from active document.'}"
+                  "${escapeHtml(item.excerpt || item.clause_excerpt || 'Control missing from active document.')}"
                 </div>
                 ${remediationHtml}`;
                 container.appendChild(row);
@@ -812,7 +851,7 @@ function loadVault() {
                     <i data-lucide="${isActive ? 'check-circle' : 'file-text'}" class="w-3.5 h-3.5"></i>
                   </div>
                   <div class="truncate">
-                    <p class="truncate font-semibold ${isActive ? 'text-emerald-200' : 'text-slate-300'}">${doc.filename}</p>
+                    <p class="truncate font-semibold ${isActive ? 'text-emerald-200' : 'text-slate-300'}">${escapeHtml(doc.filename)}</p>
                     <p class="text-[10px] text-slate-500 font-mono">${doc.pages || 1} pages • ${doc.total_chunks || 0} nodes</p>
                   </div>
                 </div>

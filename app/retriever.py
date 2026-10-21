@@ -4,6 +4,7 @@ from rank_bm25 import BM25Okapi
 from typing import List, Dict, Any
 from app.embeddings import embed_query
 from app.evaluator import extract_query_keywords, keyword_present
+from app.config import MAX_VISUAL_SCAN_PAGES
 
 
 def _search_tokens(text: str) -> List[str]:
@@ -84,9 +85,12 @@ class HybridRetriever:
         seen_parents = set()
         results = []
         citation_num = 1
+        requested_pages = {int(p) for p in re.findall(r'\bpage\s+(\d+)\b', query, re.I)}
 
         for idx in sorted_indices:
             chunk = self.chunks[idx].copy()
+            if requested_pages and chunk.get("page") not in requested_pages:
+                continue
             parent = chunk.get("parent_text", "")
             parent_key = (chunk.get("filename"), chunk.get("page"), parent or chunk.get("child_text", ""))
             if parent_key in seen_parents:
@@ -103,6 +107,33 @@ class HybridRetriever:
             if len(results) >= top_k:
                 break
 
+        # Text embeddings cannot rank the contents of un-OCRed images. Include
+        # one source per such page independently of the text top-k, within a
+        # bounded inspection budget. Never silently claim coverage of omitted pages.
+        scan_pages = {}
+        for idx, chunk in enumerate(self.chunks):
+            if chunk.get("is_scanned") and not chunk.get("is_ocr") and chunk.get("image_url"):
+                key = (chunk.get("filename"), chunk.get("page"))
+                if not requested_pages or chunk.get("page") in requested_pages:
+                    scan_pages.setdefault(key, idx)
+        if len(scan_pages) > MAX_VISUAL_SCAN_PAGES:
+            if results:
+                results[0]["visual_scan_incomplete"] = True
+                results[0]["unsearchable_page_count"] = len(scan_pages)
+            return results
+        present_pages = {(c.get("filename"), c.get("page")) for c in results if c.get("image_url")}
+        for key, idx in scan_pages.items():
+            if key in present_pages:
+                continue
+            chunk = self.chunks[idx].copy()
+            chunk.update({
+                "citation_id": len(results) + 1,
+                "dense_score": float(dense_scores[idx]),
+                "bm25_score": float(bm25_scores[idx]),
+                "rrf_score": float(rrf_map.get(idx, 0.0)),
+                "retrieval_method": "unocred_page_inspection",
+            })
+            results.append(chunk)
         return results
 
     def escalate_page_scan(

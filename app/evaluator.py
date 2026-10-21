@@ -4,6 +4,7 @@ Evaluates whether retrieved document excerpts contain sufficient semantic and le
 grounding to answer the user query without hallucination.
 """
 
+import math
 import re
 from typing import List, Dict, Any, Optional
 from app.config import SIMILARITY_THRESHOLD
@@ -148,7 +149,8 @@ def evaluate_heuristic_entailment(
             }
 
     ctx_lower = context_text.lower()
-    q_lower = query.lower()
+    # Citation-location instructions do not request a numerical metric value.
+    q_lower = re.sub(r'\b(?:please\s+)?cite\b[^?!.]*', '', query.lower()).strip()
 
     # 1. Quantitative vs Descriptive Answer Target Check
     # Identify conceptual / definitional questions (e.g. "What is an SLA?", "What is availability?", "Define uptime")
@@ -165,10 +167,16 @@ def evaluate_heuristic_entailment(
         q_lower
     ))
     has_explicit_value_request = bool(re.search(
-        r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|exact|figure|number|rate\s+of|limit\s+of|cap\s+of|maximum|minimum)\b',
+        r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|exact|figure|number|rate\s+of|limit|cap\s+of|maximum|minimum|target|goal|threshold|required|guaranteed)\b',
         q_lower
     ))
-    is_conceptual = (explicit_definitional or bare_what_is_concept) and not has_explicit_value_request
+    # Explicit definitions of targets remain conceptual; bare "what is ... target"
+    # asks for the actual value, even when the article "the" is omitted.
+    definition_request = bool(re.search(
+        r'^(?:define\b|meaning\s+of\b|definition\s+of\b|what\s+does\b.+\bmean\b|what\s+is\s+the\s+(?:concept|meaning|definition|purpose)\s+of\b)',
+        q_lower.strip(),
+    ))
+    is_conceptual = definition_request or ((explicit_definitional or bare_what_is_concept) and not has_explicit_value_request)
 
     # Strip structural document references (e.g. "Section 2", "Clause 4.1", "Table 1", "Page 3")
     # so section or page identifiers are never confused with substantive quantitative targets.
@@ -190,32 +198,35 @@ def evaluate_heuristic_entailment(
             r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|threshold)\b', q_lower
         ))
         has_qty_terms = bool(re.search(
-            r'\b(?:fee|fees|cost|costs|cap|dollar|dollars|\$|penalty|credit|uptime|availability|deductible|liability|allowance|quota)\b', q_lower
+            r'\b(?:fee|fees|cost|costs|price|cap|dollar|dollars|\$|penalty|credit|uptime|availability|deductible|liability|allowance|quota|response\s+time|notice\s+period)\b', q_lower
         ))
 
-        if has_qty_question or has_qty_terms:
+        if has_qty_question or has_qty_terms or has_explicit_value_request:
             is_quantitative = True
             # Extract query metric topic keywords to verify the quantity is associated with the requested metric
             qty_generic = STOP_WORDS | {
                 "what", "how", "many", "much", "long", "exact", "maximum", "minimum",
                 "allowed", "required", "guaranteed", "number", "amount", "percentage",
-                "percent", "figure", "value", "days", "hours", "minutes", "dollars", "dollar"
+                "percent", "figure", "value", "days", "hours", "minutes", "dollars", "dollar",
+                "target", "goal", "limit", "threshold"
             }
             metric_kws = [t for t in extract_query_keywords(q_lower) if t not in qty_generic]
             unspecified_re = re.compile(
                 r'\b(?:not\s+(?:yet\s+)?(?:been\s+)?specified|unspecified|undecided|under\s+review|to\s+be\s+determined|tbd|not\s+(?:yet\s+)?determined|not\s+(?:yet\s+)?defined|not\s+stated|none\s+specified)\b'
             )
             ctx_clauses = [
-                cl.strip() for cl in re.split(r'\.(?!\d)|[!?;\n|]+', substantive_ctx) if cl.strip()
+                cl.strip() for cl in re.split(r'\.(?!\d)|[!?;\n|]+|\s+(?:and|but|while|whereas)\s+', substantive_ctx) if cl.strip()
             ] or [substantive_ctx]
+            overlaps = [sum(keyword_present(kw, cl) for kw in metric_kws) for cl in ctx_clauses]
+            required_overlap = max(1, math.ceil(max(overlaps, default=0) * 0.6))
 
             def _clause_has_associated_quantity(pattern: str) -> bool:
-                for cl in ctx_clauses:
+                for cl, overlap in zip(ctx_clauses, overlaps):
                     if unspecified_re.search(cl):
                         continue
                     if not re.search(pattern, cl):
                         continue
-                    if not metric_kws or any(keyword_present(kw, cl) for kw in metric_kws):
+                    if not metric_kws or overlap >= required_overlap:
                         return True
                 return False
 
@@ -318,6 +329,16 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
             "nli_entailment_prob": 0.0,
             "badge": "⚠️ OUT-OF-BOUNDS (0% Grounding)",
             "reason": "No relevant text chunks found in uploaded documents."
+        }
+
+    if any(c.get("visual_scan_incomplete") for c in retrieved_chunks):
+        return {
+            "status": "REFUSE", "confidence": 0.0, "grounding_score": 0.0,
+            "dense_score": 0.0, "lexical_recall": 0.0,
+            "grounding_verdict": "INCOMPLETE_VISUAL_COVERAGE", "nli_verdict": "UNVERIFIABLE",
+            "nli_entailment_prob": 0.0, "claim_evidence_verified": False,
+            "badge": "SCAN NEEDS A PAGE SELECTION",
+            "reason": "This document has more unreadable scanned pages than can be inspected in one request. Ask about a specific page (for example, 'on page 2'), or upload an OCR-readable document.",
         }
 
     # 1. Dense Cosine Similarity

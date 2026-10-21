@@ -217,17 +217,19 @@ class LanceVectorStore:
             )
             ast.nodes[node.id] = node
 
-            if node_type == ASTNodeType.PARAGRAPH:
+            if node_type in (ASTNodeType.PARAGRAPH, ASTNodeType.VISUAL):
                 chunks.append({
                     "child_text": node.text,
                     "parent_text": node.text,
                     "page": node.page,
-                    "filename": f"{doc_id}.pdf",
+                    "filename": meta.get("filename", f"{doc_id}.pdf"),
                     "ast_node_id": node.id,
                     "materialized_path": node.materialized_path,
                     "linked_node_ids": node.linked_node_ids,
                     "image_url": node.image_url,
-                    "has_visual": bool(node.image_url)
+                    "has_visual": bool(node.image_url),
+                    "is_scanned": bool(meta.get("is_scanned", "(visual / scanned content)" in node.text.lower())),
+                    "is_ocr": bool(meta.get("is_ocr", False)),
                 })
                 v = r.get("vector")
                 if v is not None:

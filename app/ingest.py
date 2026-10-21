@@ -387,10 +387,10 @@ def hierarchical_chunk(
     default_filename = pages[0].get("filename", "Document") if pages else "Document"
     page_meta_by_num = {p.get("page", idx + 1): p for idx, p in enumerate(pages)}
 
-    # When AST is provided, derive chunks directly from AST PARAGRAPH nodes for 100% node ID & path alignment
+    # Index both text and visual leaves: tables must not disappear when prose exists.
     if ast is not None and hasattr(ast, "nodes"):
         from app.ast_builder import ASTNodeType
-        para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
+        para_nodes = [n for n in ast.nodes.values() if n.type in (ASTNodeType.PARAGRAPH, ASTNodeType.VISUAL)]
         if para_nodes:
             for p_node in para_nodes:
                 page_num = p_node.page
@@ -404,6 +404,15 @@ def hierarchical_chunk(
                     sec_title = ast.nodes[p_node.parent_id].title
 
                 img_url = p_node.image_url or page_images.get(page_num)
+                # Persist the same provenance used by live chunks so restart does not
+                # lose page images, original filenames, or no-OCR routing metadata.
+                page_meta = page_meta_by_num.get(page_num, {})
+                p_node.image_url = img_url
+                p_node.metadata.update({
+                    "filename": page_meta.get("filename", default_filename),
+                    "is_scanned": bool(page_meta.get("is_scanned", False)),
+                    "is_ocr": bool(page_meta.get("is_ocr", False)),
+                })
                 linked_visuals = []
                 for lid in p_node.linked_node_ids:
                     v_node = ast.get_node(lid)
@@ -445,7 +454,7 @@ def hierarchical_chunk(
         page_num = page["page"]
         img_url = page_images.get(page_num)
 
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', page.get("text", "")) if len(p.strip()) > 20]
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', page.get("text", "")) if p.strip()]
         if not paragraphs:
             paragraphs = [page.get("text", "").strip()] if page.get("text", "").strip() else []
 

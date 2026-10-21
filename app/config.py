@@ -47,5 +47,7 @@ for d in [DOCS_DIR, INDEX_DIR, PREVIEWS_DIR, CROPS_DIR]:
 # Retrieval & Guardrail Thresholds
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.58"))
 TOP_K = int(os.getenv("TOP_K", "4"))
+# Bound unsearchable image-page inspection; larger scans require a page-specific query.
+MAX_VISUAL_SCAN_PAGES = max(1, int(os.getenv("MAX_VISUAL_SCAN_PAGES", "8")))
 DEFAULT_EMBED_MODEL = os.getenv("DEFAULT_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(50 * 1024 * 1024)))

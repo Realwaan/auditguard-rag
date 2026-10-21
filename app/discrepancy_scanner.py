@@ -153,6 +153,26 @@ def detect_heuristic_discrepancy(text: str, visual_text: str) -> Optional[Dict[s
     return None
 
 
+def _validated_model_finding(raw: str) -> Optional[Dict[str, Any]]:
+    """Reject incomplete model JSON and keep provider output out of trusted metadata."""
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict) or parsed.get("status") not in {"ALIGN", "CAUTION", "CONTRADICTION"}:
+            return None
+        fields = ("title", "text_claim", "visual_fact", "discrepancy_delta")
+        if any(not isinstance(parsed.get(k), str) or not parsed[k].strip() for k in fields):
+            return None
+        confidence = float(parsed.get("confidence", -1))
+        if not 0 <= confidence <= 1:
+            return None
+        return {**{k: parsed[k] for k in fields}, "confidence": confidence, "status": parsed["status"]}
+    except (ValueError, TypeError):
+        return None
+
+
 def audit_cross_modal_pair(
     p_node: ASTNode,
     v_node: ASTNode,
@@ -210,9 +230,8 @@ Audit the claim against the visual data and output JSON."""
                     )
                     if resp and resp.text:
                         raw = resp.text
-                        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-                        if json_match:
-                            parsed = json.loads(json_match.group(0))
+                        parsed = _validated_model_finding(raw)
+                        if parsed:
                             if "status" in parsed:
                                 raw_status = parsed.get("status", "ALIGN")
                                 status_label = "VERIFIED_ALIGNED" if raw_status == "ALIGN" else raw_status
@@ -251,9 +270,8 @@ Audit the claim against the visual data and output JSON."""
                 )
                 raw = response.choices[0].message.content or ""
                 # Extract JSON block
-                json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-                if json_match:
-                    parsed = json.loads(json_match.group(0))
+                parsed = _validated_model_finding(raw)
+                if parsed:
                     raw_status = parsed.get("status", "ALIGN")
                     status_label = "VERIFIED_ALIGNED" if raw_status == "ALIGN" else raw_status
                     return {

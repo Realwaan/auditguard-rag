@@ -141,13 +141,13 @@ def verify_control_substance(excerpt: str, check: Dict[str, Any]) -> Dict[str, A
             }
 
     # Control specific negation heuristics
-    if check["id"] == "SLA-01" and re.search(r'\b(0%|zero\s*percent|no\s+uptime|does\s+not\s+guarantee|no\s+guarantee|best\s+effort\s+only)\b', excerpt_lower):
+    if check["id"] == "SLA-01" and re.search(r'(?<![\d.])0\s*%|\b(zero\s*percent|no\s+uptime|does\s+not\s+guarantee|no\s+guarantee|best\s+effort\s+only)\b', excerpt_lower):
         return {
             "substantive_pass": False,
             "matched_terms": [],
             "reason": "Document explicitly disclaims or negates uptime availability."
         }
-    if check["id"] == "SEC-03" and re.search(r'\b(ban\s+mfa|prohibit\s+mfa|no\s+mfa|without\s+mfa|prohibits\s+mfa)\b', excerpt_lower):
+    if check["id"] == "SEC-03" and re.search(r'\b(ban\s+mfa|prohibit\s+mfa|no\s+mfa|without\s+mfa|prohibits\s+mfa|mfa\s+(?:is\s+)?(?:not\s+required|optional))\b', excerpt_lower):
         return {
             "substantive_pass": False,
             "matched_terms": [],

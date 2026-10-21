@@ -140,7 +140,7 @@ class DocumentAST:
         """Aggregates all paragraph and section text on a specific page."""
         page_nodes = [
             n for n in self.nodes.values()
-            if n.page == page and n.text and n.type == ASTNodeType.PARAGRAPH
+            if n.page == page and n.text and n.type in (ASTNodeType.PARAGRAPH, ASTNodeType.VISUAL)
         ]
         if not page_nodes:
             page_nodes = [
@@ -262,7 +262,7 @@ def extract_halo_crops(
                     for obj in page.get_objects():
                         # PDF object type 3 corresponds to Image
                         if getattr(obj, "type", None) == 3:
-                            bbox = obj.get_pos()  # (left, bottom, right, top) in PDF coordinates
+                            bbox = obj.get_bounds()  # (left, bottom, right, top) in PDF coordinates
                             if (bbox[2] - bbox[0] > 40) and (bbox[3] - bbox[1] > 40):
                                 img_idx += 1
                                 # Inspect nearby caption region (45pt below and above image)
@@ -512,7 +512,7 @@ def build_document_ast(
     def _flush_paragraph(lines_buf: List[str], page_no: int, sec_id: str) -> Optional[ASTNode]:
         nonlocal para_counter
         joined = " ".join(ln.strip() for ln in lines_buf if ln.strip()).strip()
-        if len(joined) <= 20:
+        if not joined:
             return None
         para_id = f"{doc_id}_para_{para_counter}"
         p_node = ASTNode(
