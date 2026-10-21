@@ -1,6 +1,7 @@
 import difflib
-from typing import List, Dict, Any, Optional
-from app.retriever import HybridRetriever
+import re
+from typing import List, Dict, Any
+from app.retriever import HybridRetriever, tokenize_words
 from app.evaluator import evaluate_relevance
 
 DEFAULT_COMPLIANCE_CHECKS = [
@@ -9,49 +10,63 @@ DEFAULT_COMPLIANCE_CHECKS = [
         "category": "Service Level Agreement",
         "title": "Minimum Service Uptime Guarantee",
         "query": "What is the guaranteed service availability or uptime percentage?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["uptime", "availability", "99", "sla", "guarantee", "guarantees"],
+        "disqualifying_phrases": ["no uptime guarantee", "no availability guarantee", "best effort only", "as-is without"]
     },
     {
         "id": "PEN-02",
         "category": "Commercial Risk",
         "title": "Breach Penalty & Invoice Credit Clause",
         "query": "What penalty credit or invoice discount applies if availability drops?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["penalty", "credit", "invoice", "discount", "billing"],
+        "disqualifying_phrases": ["no penalty", "no billing credit", "waives all credits", "non-refundable"]
     },
     {
         "id": "SEC-03",
         "category": "Data Security & Access",
         "title": "Zero-Trust & Hardware-Enforced MFA",
         "query": "What are the rules for credential storage, MFA, and access control?",
-        "criticality": "CRITICAL"
+        "criticality": "CRITICAL",
+        "required_terms": ["mfa", "sso", "credentials", "authentication", "access"],
+        "disqualifying_phrases": ["without mfa", "mfa is optional", "may store credentials on local"]
     },
     {
         "id": "INC-04",
         "category": "Operational Resilience",
         "title": "Incident Escalation Notification Timeline",
         "query": "What are the mandatory logging and notification steps for security alerts?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["incident", "escalation", "minutes", "hour", "logged", "notice", "alert"],
+        "disqualifying_phrases": ["no notification required", "at vendor discretion"]
     },
     {
         "id": "FIN-05",
         "category": "Financial Controls",
         "title": "Dual Executive Sign-off for Wire Transfers",
         "query": "What is the dollar threshold requiring dual authorization for wire disbursements?",
-        "criticality": "MEDIUM"
+        "criticality": "MEDIUM",
+        "required_terms": ["wire", "dual", "authorization", "disbursements", "sign-off", "cfo"],
+        "disqualifying_phrases": ["single signature", "no dual authorization", "solely by virtual assistant"]
     },
     {
         "id": "BCP-06",
         "category": "Business Continuity",
         "title": "Disaster Recovery RTO & Off-site Failover",
         "query": "What is the disaster recovery failover timeline and recovery time objective RTO?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["disaster", "recovery", "rto", "failover", "standby"],
+        "disqualifying_phrases": ["no disaster recovery", "no failover"]
     },
     {
         "id": "ESG-07",
         "category": "Regulatory & ESG",
         "title": "Carbon Emission Offsets & Environmental Quota",
         "query": "What are the greenhouse gas carbon emission offset metrics and environmental reporting targets?",
-        "criticality": "MEDIUM"
+        "criticality": "MEDIUM",
+        "required_terms": ["carbon", "emission", "emissions", "ghg", "environmental", "offset", "offsets"],
+        "disqualifying_phrases": ["exempt from environmental", "no carbon reporting"]
     }
 ]
 
@@ -93,6 +108,40 @@ COMPLIANCE_REMEDIATION_PLAYBOOK: Dict[str, Dict[str, str]] = {
     }
 }
 
+
+def verify_control_substance(excerpt: str, check: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Verifies that a retrieved excerpt actually addresses the compliance control substance
+    rather than merely sharing superficial embedding similarity, and checks for disqualifying negations.
+    """
+    if not excerpt or not excerpt.strip():
+        return {"substantive_pass": False, "matched_terms": [], "reason": "Empty clause excerpt."}
+
+    excerpt_lower = excerpt.lower()
+    for bad_phrase in check.get("disqualifying_phrases", []):
+        if bad_phrase in excerpt_lower:
+            return {
+                "substantive_pass": False,
+                "matched_terms": [],
+                "reason": f"Clause explicitly negates control requirement ('{bad_phrase}')."
+            }
+
+    words = set(tokenize_words(excerpt_lower))
+    required = check.get("required_terms", [])
+    matched = [
+        term for term in required
+        if term in words or re.search(r'\b' + re.escape(term) + r'\b', excerpt_lower)
+    ]
+
+    # Require at least 2 domain control terms (or 1 if the control has <= 2 terms)
+    min_required = min(2, len(required)) if required else 0
+    return {
+        "substantive_pass": len(matched) >= min_required,
+        "matched_terms": matched,
+        "reason": "Control terms verified." if len(matched) >= min_required else "Insufficient control-specific terms in excerpt."
+    }
+
+
 def generate_redline_diff(original_text: str, target_clause: str, control_id: str) -> str:
     """Generates a clean unified git-style diff showing the proposed remediation insertion."""
     from_lines = [f"{original_text}\n"] if original_text and original_text.strip() else []
@@ -108,11 +157,11 @@ def generate_redline_diff(original_text: str, target_clause: str, control_id: st
     )
     return "".join(diff)
 
+
 def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
     """
     Executes an automated multi-point pre-flight compliance audit across the active document.
-    Runs in under 40 milliseconds using in-memory hybrid search.
-    Enriched with automated redline remediation diffs and playbooks.
+    Combines hybrid retrieval, CRAG relevance thresholding, and substantive control term & polarity verification.
     """
     results = []
     passed_count = 0
@@ -120,16 +169,17 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
 
     for check in DEFAULT_COMPLIANCE_CHECKS:
         retrieved = retriever.retrieve(check["query"], top_k=2)
-        eval_res = evaluate_relevance(retrieved)
+        eval_res = evaluate_relevance(retrieved, query=check["query"])
         remediation = COMPLIANCE_REMEDIATION_PLAYBOOK.get(check["id"], {})
 
-        if eval_res["status"] == "SYNTHESIZE":
-            best_chunk = retrieved[0]
-            excerpt = best_chunk.get("parent_text", best_chunk.get("child_text", ""))
-            # Truncate clean excerpt for summary card
+        best_chunk = retrieved[0] if retrieved else {}
+        excerpt = best_chunk.get("parent_text", best_chunk.get("child_text", "")) if best_chunk else ""
+        substance = verify_control_substance(excerpt, check)
+
+        if eval_res["status"] == "SYNTHESIZE" and substance["substantive_pass"]:
             clean_excerpt = excerpt.split("\n")[0].strip()
-            if len(clean_excerpt) > 110:
-                clean_excerpt = clean_excerpt[:107] + "..."
+            if len(clean_excerpt) > 130:
+                clean_excerpt = clean_excerpt[:127] + "..."
 
             passed_count += 1
             results.append({
@@ -141,12 +191,14 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "status": "PASS",
                 "badge": "✅ PASS",
                 "confidence": eval_res["confidence"],
+                "matched_terms": substance["matched_terms"],
                 "clause_excerpt": clean_excerpt,
+                "excerpt": clean_excerpt,
                 "full_clause": excerpt,
                 "page": best_chunk.get("page", 1),
                 "image_url": best_chunk.get("image_url", ""),
                 "citation_id": best_chunk.get("citation_id", 1),
-                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence.",
+                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} ({eval_res['confidence']}% confidence; matched: {', '.join(substance['matched_terms'][:4])}).",
                 "remediation_clause": "Compliant with enterprise standard. No remediation required.",
                 "redline_diff": None,
                 "action_plan": "Verified active in document.",
@@ -158,6 +210,9 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
             action = remediation.get("action_required", "Remediation insertion required.")
             rationale = remediation.get("rationale", "Mandatory compliance clause.")
             redline = generate_redline_diff("", std_clause, check["id"])
+            gap_msg = "Clause not present in agreement or below confidence threshold."
+            if eval_res["status"] == "SYNTHESIZE" and not substance["substantive_pass"]:
+                gap_msg = substance["reason"]
 
             results.append({
                 "id": check["id"],
@@ -168,7 +223,9 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "status": "GAP",
                 "badge": "❌ GAP DETECTED",
                 "confidence": eval_res["confidence"],
-                "clause_excerpt": "Clause not present in agreement or below confidence threshold.",
+                "matched_terms": substance["matched_terms"],
+                "clause_excerpt": gap_msg,
+                "excerpt": gap_msg,
                 "full_clause": "",
                 "page": None,
                 "image_url": "",
@@ -205,4 +262,3 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
         "remediation_count": gaps_count,
         "remediation_playbook_available": True
     }
-

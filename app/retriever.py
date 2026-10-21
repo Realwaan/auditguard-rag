@@ -1,7 +1,20 @@
+import re
 import numpy as np
 from rank_bm25 import BM25Okapi
 from typing import List, Dict, Any
 from app.embeddings import embed_query
+
+STOP_WORDS = {
+    "what", "is", "the", "are", "how", "for", "and", "with", "does", "can",
+    "in", "of", "to", "a", "an", "on", "by", "from", "that", "this", "it",
+    "be", "or", "as", "at", "if", "who", "which", "when", "where", "why"
+}
+
+
+def tokenize_words(text: str) -> List[str]:
+    """Tokenizes text into lowercase alphanumeric words, stripping punctuation."""
+    return re.findall(r'[a-z0-9]+(?:\.[0-9]+)?', text.lower())
+
 
 class HybridRetriever:
     """
@@ -11,13 +24,12 @@ class HybridRetriever:
     def __init__(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray):
         self.chunks = chunks
         self.embeddings = embeddings  # Shape: (N, 384), pre-normalized unit vectors
-        
-        # Tokenize child sentences for BM25
+
         if not chunks:
             self.bm25 = None
             return
 
-        tokenized_corpus = [c["child_text"].lower().split() for c in chunks]
+        tokenized_corpus = [tokenize_words(c.get("child_text", "")) or [""] for c in chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
 
     def retrieve(self, query: str, top_k: int = 4, k_rrf: int = 60) -> List[Dict[str, Any]]:
@@ -25,45 +37,60 @@ class HybridRetriever:
             return []
 
         # 1. Sparse BM25 Search
-        query_tokens = query.lower().split()
-        bm25_scores = self.bm25.get_scores(query_tokens)
-        bm25_rank_indices = np.argsort(bm25_scores)[::-1][:top_k * 3]
+        query_tokens = tokenize_words(query)
+        bm25_scores = self.bm25.get_scores(query_tokens) if query_tokens else np.zeros(len(self.chunks))
+        bm25_rank_indices = np.argsort(bm25_scores)[::-1][:max(top_k * 3, 10)]
 
         # 2. Dense Vector Dot Product Search
         q_vec = embed_query(query)
         dense_scores = np.dot(self.embeddings, q_vec)
-        dense_rank_indices = np.argsort(dense_scores)[::-1][:top_k * 3]
+        dense_rank_indices = np.argsort(dense_scores)[::-1][:max(top_k * 3, 10)]
 
         # 3. Reciprocal Rank Fusion (RRF)
-        # RRF_Score = sum(1.0 / (k_rrf + rank))
-        rrf_map = {}
+        rrf_map: Dict[int, float] = {}
 
         for rank, idx in enumerate(bm25_rank_indices):
-            if bm25_scores[idx] > 0:  # only score positive lexical matches
-                rrf_map[idx] = rrf_map.get(idx, 0.0) + (1.0 / (k_rrf + rank))
+            if bm25_scores[idx] > 0:
+                rrf_map[int(idx)] = rrf_map.get(int(idx), 0.0) + (1.0 / (k_rrf + rank))
 
         for rank, idx in enumerate(dense_rank_indices):
-            rrf_map[idx] = rrf_map.get(idx, 0.0) + (1.0 / (k_rrf + rank))
+            rrf_map[int(idx)] = rrf_map.get(int(idx), 0.0) + (1.0 / (k_rrf + rank))
 
-        # Sort indices by highest RRF score
-        sorted_indices = sorted(rrf_map.keys(), key=lambda i: rrf_map[i], reverse=True)[:top_k]
+        # Sort indices by highest RRF score (breaking ties by dense similarity)
+        sorted_indices = sorted(
+            rrf_map.keys(),
+            key=lambda i: (rrf_map[i], float(dense_scores[i])),
+            reverse=True
+        )
 
-        # Deduplicate parent paragraphs if multiple child sentences hit the same parent
-        seen_parents = set()
-        results = []
+        # Deduplicate parent paragraphs while preserving the best dense/BM25 scores across child hits
+        seen_parents: Dict[str, Dict[str, Any]] = {}
+        results: List[Dict[str, Any]] = []
         citation_num = 1
 
         for idx in sorted_indices:
             chunk = self.chunks[idx].copy()
-            parent = chunk["parent_text"]
+            parent = chunk.get("parent_text", "")
+            d_score = float(dense_scores[idx])
+            b_score = float(bm25_scores[idx])
+            r_score = float(rrf_map[idx])
+
             if parent in seen_parents:
+                existing = seen_parents[parent]
+                if d_score > existing["dense_score"]:
+                    existing["dense_score"] = d_score
+                if b_score > existing["bm25_score"]:
+                    existing["bm25_score"] = b_score
                 continue
-            seen_parents.add(parent)
+
+            if len(results) >= top_k:
+                continue
 
             chunk["citation_id"] = citation_num
-            chunk["dense_score"] = float(dense_scores[idx])
-            chunk["bm25_score"] = float(bm25_scores[idx])
-            chunk["rrf_score"] = float(rrf_map[idx])
+            chunk["dense_score"] = d_score
+            chunk["bm25_score"] = b_score
+            chunk["rrf_score"] = r_score
+            seen_parents[parent] = chunk
             results.append(chunk)
             citation_num += 1
 
@@ -78,14 +105,13 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Tier-2 CRAG Hierarchical Tree Escalation:
-        When chunk-level confidence falls below threshold (< 0.50), promotes the search
+        When chunk-level confidence falls below threshold, promotes the search
         to Whole-Page scanning across candidate pages to recover multi-paragraph context.
-        Returns escalated whole-page chunks if verified; otherwise empty list.
+        Computes genuine whole-page dense embedding similarity and whole-word lexical coverage.
         """
         if not self.chunks:
             return []
 
-        # 1. Determine candidate pages to scan
         pages_to_check = candidate_pages
         if not pages_to_check:
             if ast and hasattr(ast, "get_all_pages"):
@@ -96,16 +122,15 @@ class HybridRetriever:
         if not pages_to_check:
             return []
 
-        import re
         q_vec = embed_query(query)
-        stop_words = {"what", "is", "the", "are", "how", "for", "and", "with", "does", "can", "in", "of", "to", "a"}
-        raw_tokens = [re.sub(r'[^a-zA-Z0-9]', '', t) for t in query.lower().split()]
-        query_tokens = [t for t in raw_tokens if len(t) > 2 and t not in stop_words]
+        raw_tokens = tokenize_words(query)
+        query_tokens = [t for t in raw_tokens if len(t) > 2 and t not in STOP_WORDS]
         if not query_tokens:
             query_tokens = [t for t in raw_tokens if len(t) > 2]
 
         best_page = None
         best_score = 0.0
+        best_lexical = 0.0
         best_text = ""
 
         for p in pages_to_check:
@@ -118,30 +143,37 @@ class HybridRetriever:
             if not page_text.strip():
                 continue
 
-            # Dense similarity against chunks on this page
+            # 1. Chunk-level dense scores on this page
             page_dense_scores = [
                 float(np.dot(self.embeddings[i], q_vec))
                 for i, c in enumerate(self.chunks)
-                if c.get("page") == p
+                if c.get("page") == p and i < len(self.embeddings)
             ]
-            max_dense = max(page_dense_scores) if page_dense_scores else 0.0
+            max_chunk_dense = max(page_dense_scores) if page_dense_scores else 0.0
 
-            # Lexical coverage of query tokens across the whole page text
-            page_lower = page_text.lower()
-            matching_tokens = sum(1 for t in query_tokens if t in page_lower)
+            # 2. Whole-page dense vector similarity (captures multi-paragraph context)
+            page_vec = embed_query(page_text[:2000])
+            whole_page_dense = float(np.dot(page_vec, q_vec))
+            max_dense = max(max_chunk_dense, whole_page_dense)
+
+            # 3. Exact whole-word lexical token coverage across the page
+            page_word_set = set(tokenize_words(page_text))
+            matching_tokens = sum(1 for t in query_tokens if t in page_word_set)
             lexical_ratio = matching_tokens / max(1, len(query_tokens))
 
-            # Composite whole-page relevance score
-            # If key query concepts span across paragraphs on this page, boost confidence to ground synthesis
-            boosted_lexical = round(0.55 + (lexical_ratio * 0.35), 3) if lexical_ratio >= 0.50 else round(lexical_ratio * 0.50, 3)
-            page_score = max(max_dense, boosted_lexical)
+            # Combine whole-page dense similarity and exact multi-paragraph term coverage
+            page_score = round(0.65 * max_dense + 0.35 * lexical_ratio, 3) if query_tokens else round(max_dense, 3)
+            # If all or nearly all distinct content terms appear as whole words on this page,
+            # reflect that multi-paragraph coverage in the page relevance score
+            if lexical_ratio >= 0.66 and max_dense >= 0.35:
+                page_score = max(page_score, round(0.50 + 0.35 * lexical_ratio, 3))
 
             if page_score > best_score:
                 best_score = page_score
+                best_lexical = lexical_ratio
                 best_page = p
                 best_text = page_text
 
-        # If whole-page context satisfies threshold, promote to whole-page synthesis
         if best_page is not None and best_score >= min_threshold:
             filename = ast.title if (ast and hasattr(ast, "title")) else self.chunks[0].get("filename", "Document")
             return [{
@@ -151,8 +183,9 @@ class HybridRetriever:
                 "filename": filename,
                 "page": best_page,
                 "dense_score": round(best_score, 3),
-                "bm25_score": 1.0,
-                "rrf_score": 1.0,
+                "bm25_score": round(best_lexical, 3),
+                "rrf_score": round(best_score, 3),
+                "lexical_coverage": round(best_lexical, 3),
                 "escalated_from": "whole_page_scan"
             }]
 

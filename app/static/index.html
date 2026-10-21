@@ -238,7 +238,7 @@
       </button>
       <div id="ingest-speed-badge" class="hidden items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950/90 border border-emerald-500/30 text-xs font-mono text-emerald-400 shadow-sm">
         <i data-lucide="zap" class="w-3.5 h-3.5 text-emerald-400"></i>
-        <span>Indexed in <strong id="ingest-speed-val" class="font-bold text-white">0.05s</strong> (Zero-LLM)</span>
+        <span>Indexed in <strong id="ingest-speed-val" class="font-bold text-white">0.05s</strong></span>
       </div>
 
       <div id="doc-badge-container" class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700/80">
@@ -349,15 +349,15 @@
             <p class="text-xs text-slate-200 group-hover:text-white leading-snug">Does the 99.9% uptime SLA match Table 1 in Sept?</p>
           </button>
 
-          <!-- Scenario 2: SLA Penalty -->
-          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="What is the penalty credit if availability drops below 99.5%?" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-indigo-600/60 transition shadow-sm">
+          <!-- Scenario 2: SLA Penalty & Dual Wire Auth -->
+          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="What is the penalty credit if availability drops below 99.5%, and who must sign off on wire transfers exceeding $50,000?" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-indigo-600/60 transition shadow-sm">
             <div class="flex items-center justify-between mb-1">
               <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 flex items-center gap-1">
-                <i data-lucide="scale" class="w-2.5 h-2.5"></i> SLA PENALTY
+                <i data-lucide="scale" class="w-2.5 h-2.5"></i> SLA & CONTROLS
               </span>
               <span class="text-[10px] text-slate-500 group-hover:text-indigo-400 font-mono transition">Run ➔</span>
             </div>
-            <p class="text-xs text-slate-200 group-hover:text-white leading-snug">What is the penalty credit if availability drops below 99.5%?</p>
+            <p class="text-xs text-slate-200 group-hover:text-white leading-snug">What is the SLA penalty credit and $50k wire sign-off rule?</p>
           </button>
 
           <!-- Scenario 3: Flowchart Multi-Step -->
@@ -372,14 +372,14 @@
           </button>
 
           <!-- Scenario 4: CRAG Defense Refusal -->
-          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="Can a virtual assistant approve a $100,000 wire transfer alone? (Refusal Test)" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-rose-600/60 transition shadow-sm">
+          <button onclick="setQuery(this.getAttribute('data-query'))" data-query="What is the company policy regarding end-of-year holiday bonuses and crypto stipends? (Refusal Test)" class="group text-left p-2.5 rounded-xl bg-slate-950/80 hover:bg-slate-850 border border-slate-800/90 hover:border-rose-600/60 transition shadow-sm">
             <div class="flex items-center justify-between mb-1">
               <span class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-800/60 flex items-center gap-1">
                 <i data-lucide="shield-alert" class="w-2.5 h-2.5"></i> REFUSAL TEST
               </span>
               <span class="text-[10px] text-slate-500 group-hover:text-rose-400 font-mono transition">Run ➔</span>
             </div>
-            <p class="text-xs text-rose-200/90 group-hover:text-rose-100 leading-snug">Can a virtual assistant approve a $100,000 wire transfer alone?</p>
+            <p class="text-xs text-rose-200/90 group-hover:text-rose-100 leading-snug">What is the policy on holiday bonuses and crypto stipends?</p>
           </button>
         </div>
       </section>
@@ -469,7 +469,7 @@
               <span id="grounding-badge" class="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono font-semibold border border-slate-700 shrink-0">Awaiting Query</span>
             </div>
             <div class="flex items-center justify-between text-[11px] font-mono pl-8">
-              <span class="text-emerald-400 font-medium">Gemma 4 (31B) • AST Grounded</span>
+              <span class="text-emerald-400 font-medium">Gemma 4 • AST Grounded</span>
               <span id="metrics-badge" class="text-slate-400 hidden sm:inline">⚡ 0ms</span>
             </div>
           </div>
