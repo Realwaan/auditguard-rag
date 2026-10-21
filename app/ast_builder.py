@@ -653,6 +653,23 @@ def build_document_ast(
         if para_buffer:
             _flush_paragraph(para_buffer, page_num, current_section_id)
 
+        # Ensure pages with short text (e.g. brief OCR or single-metric scan pages) are never dropped from the AST
+        if raw_text and not any(
+            n.page == page_num and n.type in (ASTNodeType.PARAGRAPH, ASTNodeType.VISUAL)
+            for n in ast.nodes.values()
+        ):
+            para_id = f"{doc_id}_para_{para_counter}"
+            p_node = ASTNode(
+                id=para_id,
+                type=ASTNodeType.PARAGRAPH,
+                title=f"Paragraph {para_counter} (Page {page_num})",
+                text=raw_text,
+                page=page_num,
+                materialized_path=f"root/{current_section_id}/{para_id}",
+            )
+            ast.add_node(p_node, parent_id=current_section_id)
+            para_counter += 1
+
     # 1.5 Synthesize Thematic Section Summaries (RAPTOR-Style AST Layer)
     for node in list(ast.nodes.values()):
         if node.type == ASTNodeType.SECTION:

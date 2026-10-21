@@ -137,7 +137,25 @@ UNIT_MAPPINGS = [
     (r'\b(?:mb|megabytes?)\b', 'mb'),
     (r'\b(?:gb|gigabytes?)\b', 'gb'),
     (r'\b(?:tb|terabytes?)\b', 'tb'),
+    (r'\b(?:items?)\b', 'item'),
 ]
+
+UNIT_WORDS = {
+    "day", "days", "d", "business", "working", "calendar", "consecutive",
+    "hour", "hours", "hr", "hrs", "h",
+    "minute", "minutes", "min", "mins", "m",
+    "second", "seconds", "sec", "secs", "s",
+    "week", "weeks", "wk", "wks", "w",
+    "month", "months", "mo", "mos",
+    "year", "years", "yr", "yrs", "y",
+    "percent", "percentage", "pct",
+    "usd", "dollar", "dollars", "cent", "cents",
+    "eur", "euro", "euros", "gbp", "pound", "pounds",
+    "byte", "bytes", "b", "kb", "kilobyte", "kilobytes",
+    "mb", "megabyte", "megabytes", "gb", "gigabyte", "gigabytes",
+    "tb", "terabyte", "terabytes",
+    "item", "items",
+}
 
 def resolve_unit(token: str) -> Optional[str]:
     t = token.lower().strip()
@@ -150,7 +168,7 @@ def extract_quantities(text: str) -> List[Tuple[float, Optional[str]]]:
     """Extracts numbers and their canonical units, ignoring citation badges [1], [2]."""
     text_clean = re.sub(r'\[\s*\d+\s*\]', '', text)
     normalized = normalize_written_numbers(text_clean).lower()
-    pattern = r'([$€£])?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\b[a-zA-Z_]+(?:\s+[a-zA-Z_]+)?\b)?'
+    pattern = r'([$€£])?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\b(?:business|working|calendar|consecutive)\s+[a-zA-Z_]+\b|\b[a-zA-Z_]+\b)?'
     results = []
     for m in re.finditer(pattern, normalized):
         curr_prefix, num_str, unit_str = m.groups()
@@ -168,24 +186,81 @@ def extract_quantities(text: str) -> List[Tuple[float, Optional[str]]]:
         results.append((val, unit))
     return results
 
+def _extract_subject_tokens(text: str) -> List[str]:
+    """Extracts non-unit, non-numerical content tokens describing a statement's metric or subject."""
+    generic = (
+        STOP_WORDS | UNIT_WORDS | {
+            "the", "and", "that", "this", "with", "from", "for", "are", "was", "were",
+            "been", "has", "have", "had", "will", "shall", "may", "can", "must", "not",
+            "according", "records", "excerpts", "clause", "page", "section", "provides",
+            "states", "specifies", "under", "per", "within", "than", "more", "less", "least"
+        }
+    )
+    norm = normalize_written_numbers(re.sub(r'\[\s*\d+\s*\]', '', text)).lower()
+    return [t for t in re.findall(r'\b[a-zA-Z_]{3,}\b', norm) if t not in generic]
+
+def _split_into_metric_clauses(text: str) -> List[str]:
+    """
+    Splits chunk text into constituent metric statements across sentence boundaries,
+    semicolons, pipes, bullet points, and multi-metric coordinating conjunctions.
+    Avoids splitting decimal points inside numbers (e.g. 99.9%).
+    """
+    norm = normalize_written_numbers(text).lower()
+    primary = [seg.strip() for seg in re.split(r'\.(?!\d)|[!?;\n|•●]+|\s+-\s+', norm) if seg.strip()]
+    clauses: List[str] = []
+    for seg in primary:
+        sub_parts = [
+            s.strip() for s in re.split(r',?\s+\b(?:and|but|while|whereas)\b\s+|,\s+(?=[a-zA-Z0-9_$€£])', seg)
+            if s.strip()
+        ]
+        qualifying = [s for s in sub_parts if extract_quantities(s) and _extract_subject_tokens(s)]
+        if len(sub_parts) > 1 and len(qualifying) >= 2:
+            clauses.extend(sub_parts)
+        else:
+            clauses.append(seg)
+    return clauses if clauses else [norm]
+
 def check_quantity_support(claim_text: str, chunk_text: str) -> Tuple[bool, Optional[str]]:
-    """Checks that numbers and their units in claim_text are supported by chunk_text."""
+    """
+    Checks that numbers and their units in claim_text are supported by chunk_text,
+    and that each quantity belongs to the same metric statement/clause as the claim's subject.
+    """
     claim_q = extract_quantities(claim_text)
     if not claim_q:
         return True, None
     chunk_q = extract_quantities(chunk_text)
     chunk_vals = {v for (v, u) in chunk_q}
-    
+    claim_subjects = _extract_subject_tokens(claim_text)
+    clauses = _split_into_metric_clauses(chunk_text)
+    clause_info = [
+        (cl, extract_quantities(cl), sum(1 for t in claim_subjects if keyword_present(t, cl)))
+        for cl in clauses
+    ]
+    best_subject_overlap = max((ov for (_, _, ov) in clause_info), default=0)
+
     for c_val, c_unit in claim_q:
-        if (c_val, c_unit) in chunk_q:
-            continue
-        conflicts = [u for (v, u) in chunk_q if v == c_val and u != c_unit and u is not None and c_unit is not None]
-        if conflicts:
-            return False, f"Unit mismatch: claim states {c_val} {c_unit}, but cited chunk states {c_val} {conflicts[0]}"
         if c_val not in chunk_vals:
             return False, f"Numerical discrepancy: value {c_val} not found in cited chunk"
-        if c_unit is not None and not any(v == c_val and (u == c_unit or u is None) for (v, u) in chunk_q):
-            return False, f"Unit mismatch: claim states {c_val} {c_unit}, not supported in cited chunk"
+        if c_unit is not None:
+            # When the claim specifies a unit, require explicit support for that unit (never accept u is None)
+            if not any(v == c_val and u == c_unit for (v, u) in chunk_q):
+                conflicts = [u for (v, u) in chunk_q if v == c_val and u != c_unit and u is not None]
+                if conflicts:
+                    return False, f"Unit mismatch: claim states {c_val} {c_unit}, but cited chunk states {c_val} {conflicts[0]}"
+                return False, f"Unit mismatch: claim states {c_val} {c_unit}, not supported in cited chunk"
+
+        # Verify statement-level association: the quantity must appear in a clause that supports the claim's subject
+        if claim_subjects:
+            matching_clauses = [
+                (cl, ov) for (cl, cl_q, ov) in clause_info
+                if any(v == c_val and (u == c_unit if c_unit is not None else True) for (v, u) in cl_q)
+            ]
+            min_required_overlap = max(1, int(best_subject_overlap * 0.6))
+            if not any(ov >= min_required_overlap for (_, ov) in matching_clauses):
+                return (
+                    False,
+                    f"Statement mismatch: quantity {c_val}{(' ' + c_unit) if c_unit else ''} belongs to a different statement in cited chunk"
+                )
 
     return True, None
 
@@ -259,11 +334,11 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
         end_idx = match.end()
 
         # Segment between previous boundary and current citation
-        clause_raw = answer[prev_end:start_idx].strip()
+        clause_raw = answer[prev_end:start_idx].strip().lstrip(".,;:!? \t\r\n")
         
         # Split into distinct sentences to associate citations specifically with individual claims
         # and prevent paragraph-trailing citations from swallowing preceding uncited factual assertions.
-        raw_sentences = re.split(r'(?<=[a-zA-Z0-9][.!?])\s+(?=[A-Z0-9])|\n+', clause_raw)
+        raw_sentences = re.split(r'(?<=[a-zA-Z0-9%)"\'][.!?])\s+(?=[A-Z0-9"$(\'])|\n+', clause_raw)
         cleaned_sentences = [s.strip() for s in raw_sentences if s.strip()]
 
         if len(cleaned_sentences) > 1:
@@ -288,11 +363,11 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
             claim_clause = ""
 
         claim_clause = claim_clause.strip(" \n\r.,;:!?")
-        if not claim_clause:
-            claim_clause = previous_claim  # adjacent citations support the same claim
+        claim_clause = re.sub(r'^[,\s]*(?:and|or|but|also|furthermore)?\s*', '', claim_clause, flags=re.IGNORECASE)
+        if not re.search(r'[a-zA-Z0-9]', claim_clause):
+            claim_clause = previous_claim  # genuinely adjacent citations support the same claim
         else:
             previous_claim = claim_clause
-        claim_clause = re.sub(r'^[,\s]*(?:and|or|but|also|furthermore)?\s*', '', claim_clause, flags=re.IGNORECASE)
         prev_end = end_idx
 
         target_chunk = chunk_map.get(cid)
@@ -307,7 +382,7 @@ def verify_citations_grounding(answer: str, chunks: List[Dict[str, Any]]) -> Dic
             })
             continue
 
-        chunk_text = (target_chunk.get("parent_text", "") + " " + target_chunk.get("child_text", "")).lower()
+        chunk_text = f"{target_chunk.get('parent_text', '')}.\n{target_chunk.get('child_text', '')}".lower()
         claim_text = claim_clause.lower()
 
         # 1. Rigorous quantity & unit verification (handles written numbers, units, currency)

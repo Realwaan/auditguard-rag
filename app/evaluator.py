@@ -132,12 +132,24 @@ def evaluate_heuristic_entailment(
     q_lower = query.lower()
 
     # 1. Quantitative vs Descriptive Answer Target Check
-    # Identify conceptual / definitional questions (e.g. "What is an SLA?", "Define availability")
+    # Identify conceptual / definitional questions (e.g. "What is an SLA?", "What is availability?", "Define uptime")
     # which seek conceptual explanations rather than quantitative metrics.
-    is_conceptual = bool(re.search(
-        r'^(?:what\s+is\s+(?:an?|the\s+concept\s+of)\b|define\b|meaning\s+of\b|explain\s+(?:what\s+is\s+)?(?:an?|the\s+concept\s+of)\b)',
+    explicit_definitional = bool(re.search(
+        r'^(?:what\s+(?:is|are)\s+(?:an?|the\s+(?:concept|meaning|definition|purpose)\s+of)\b|define\b|meaning\s+of\b|definition\s+of\b|explain\s+(?:what\s+is\s+)?(?:an?|the\s+(?:concept|meaning|definition)\s+of)\b|what\s+does\b.+\bmean\b)',
         q_lower.strip()
-    )) and not bool(re.search(r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|exact|figure|number|rate\s+of|limit\s+of|cap\s+of)\b', q_lower))
+    ))
+    bare_what_is_concept = bool(re.search(
+        r'^what\s+(?:is|are)\s+(?!(?:the|our|your|their|its|this|that|current|required|guaranteed|minimum|maximum)\b)[a-zA-Z0-9_\-\s]{2,30}\??$',
+        q_lower.strip()
+    )) and not bool(re.search(
+        r'\b(?:fee|fees|cost|costs|price|cap|dollar|dollars|\$|penalty|credit|deductible|liability|threshold|allowance|quota|response\s+time|notice\s+period)\b',
+        q_lower
+    ))
+    has_explicit_value_request = bool(re.search(
+        r'\b(?:how\s+much|how\s+many|how\s+long|amount|percentage|percent|exact|figure|number|rate\s+of|limit\s+of|cap\s+of|maximum|minimum)\b',
+        q_lower
+    ))
+    is_conceptual = (explicit_definitional or bare_what_is_concept) and not has_explicit_value_request
 
     # Strip structural document references (e.g. "Section 2", "Clause 4.1", "Table 1", "Page 3")
     # so section or page identifiers are never confused with substantive quantitative targets.
@@ -164,27 +176,56 @@ def evaluate_heuristic_entailment(
 
         if has_qty_question or has_qty_terms:
             is_quantitative = True
+            # Extract query metric topic keywords to verify the quantity is associated with the requested metric
+            qty_generic = STOP_WORDS | {
+                "what", "how", "many", "much", "long", "exact", "maximum", "minimum",
+                "allowed", "required", "guaranteed", "number", "amount", "percentage",
+                "percent", "figure", "value", "days", "hours", "minutes", "dollars", "dollar"
+            }
+            metric_kws = [t for t in extract_query_keywords(q_lower) if t not in qty_generic]
+            unspecified_re = re.compile(
+                r'\b(?:not\s+(?:yet\s+)?(?:been\s+)?specified|unspecified|undecided|under\s+review|to\s+be\s+determined|tbd|not\s+(?:yet\s+)?determined|not\s+(?:yet\s+)?defined|not\s+stated|none\s+specified)\b'
+            )
+            ctx_clauses = [
+                cl.strip() for cl in re.split(r'\.(?!\d)|[!?;\n|]+', substantive_ctx) if cl.strip()
+            ] or [substantive_ctx]
+
+            def _clause_has_associated_quantity(pattern: str) -> bool:
+                for cl in ctx_clauses:
+                    if unspecified_re.search(cl):
+                        continue
+                    if not re.search(pattern, cl):
+                        continue
+                    if not metric_kws or any(keyword_present(kw, cl) for kw in metric_kws):
+                        return True
+                return False
+
             # Verify that context contains numbers associated with the requested quantity type
             if re.search(r'\b(?:how\s+many\s+days|days\s+of|number\s+of\s+days|leave\s+days|notice\s+period)\b', q_lower):
-                has_numerical_target = bool(re.search(
-                    r'\b\d+(?:\.\d+)?\s*(?:business\s+days?|calendar\s+days?|working\s+days?|days?)\b', substantive_ctx
-                ))
+                has_numerical_target = _clause_has_associated_quantity(
+                    r'\b\d+(?:\.\d+)?\s*(?:business\s+days?|calendar\s+days?|working\s+days?|days?)\b'
+                )
             elif re.search(r'\b(?:how\s+many\s+hours|hours\s+of|response\s+time)\b', q_lower):
-                has_numerical_target = bool(re.search(
-                    r'\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?)\b', substantive_ctx
-                ))
+                has_numerical_target = _clause_has_associated_quantity(
+                    r'\b\d+(?:\.\d+)?\s*(?:business\s+hours?|working\s+hours?|hours?|hrs?|minutes?|mins?|days?)\b'
+                )
             elif re.search(r'\b(?:how\s+long)\b', q_lower):
-                has_numerical_target = bool(re.search(
-                    r'\b\d+(?:\.\d+)?\s*(?:business\s+days?|calendar\s+days?|days?|hours?|hrs?|minutes?|weeks?|months?|years?)\b', substantive_ctx
-                ))
+                has_numerical_target = _clause_has_associated_quantity(
+                    r'\b\d+(?:\.\d+)?\s*(?:business\s+days?|calendar\s+days?|working\s+days?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?)\b'
+                )
             elif re.search(r'\b(?:percentage|percent|uptime|availability)\b', q_lower):
-                has_numerical_target = bool(re.search(r'\b\d+(?:\.\d+)?\s*(?:%|percent\b)', substantive_ctx))
-            elif re.search(r'\b(?:fee|cost|price|dollar|dollars|\$|threshold|deductible|liability|cap|penalty|credit)\b', q_lower):
-                has_numerical_target = bool(re.search(
-                    r'(?:[$€£]\s*\d+|\b\d+(?:\.\d+)?\s*(?:dollars?|cents?|usd|eur|euros?|gbp|pounds?|%|percent)\b)', substantive_ctx
-                )) or bool(re.findall(r'\b\d+(?:\.\d+)?%?\b', substantive_ctx))
+                has_numerical_target = _clause_has_associated_quantity(
+                    r'\b\d+(?:\.\d+)?\s*(?:%|percent(?:age)?\b)'
+                )
+            elif re.search(r'\b(?:fee|fees|cost|costs|price|dollar|dollars|\$|threshold|deductible|liability|cap|penalty|credit)\b', q_lower):
+                has_numerical_target = _clause_has_associated_quantity(
+                    r'(?:[$€£]\s*\d+(?:,\d{3})*(?:\.\d+)?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:%|\b(?:dollars?|cents?|usd|eur|euros?|gbp|pounds?|percent(?:age)?|x|times|months?\s+of\s+fees?)\b))'
+                )
             else:
-                has_numerical_target = bool(re.findall(r'\b\d+(?:\.\d+)?%?\b', substantive_ctx))
+                # Exclude standalone calendar years (e.g. "in 2024") from satisfying general quantity questions
+                has_numerical_target = _clause_has_associated_quantity(
+                    r'(?<!\bin\s)(?<!\bsince\s)(?<!\bfrom\s)\b\d+(?:,\d{3})*(?:\.\d+)?%?\b'
+                )
 
     if is_quantitative and not has_numerical_target:
         # Context is on-topic but lacks the actual numerical figure requested
@@ -311,6 +352,34 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
             "nli_method": eval_method,
             "badge": f"⚠️ OUT-OF-BOUNDS (Contradictory Premise)",
             "reason": nli_eval.get("reason", "Retrieved evidence directly contradicts the query proposition.")
+        }
+
+    # If retrieved chunks are visual-only scanned pages without OCR text, allow multimodal visual inspection
+    has_unocred_visual_scan = any(
+        c.get("has_visual") and c.get("image_url") and (
+            (c.get("is_scanned") and not c.get("is_ocr"))
+            or "(visual / scanned content)" in c.get("parent_text", "").lower()
+        )
+        for c in retrieved_chunks
+    )
+    if has_unocred_visual_scan and nli_verdict == "NEUTRAL":
+        return {
+            "status": "SYNTHESIZE",
+            "confidence": confidence_pct,
+            "grounding_score": composite_grounding,
+            "dense_score": round(top_dense, 3),
+            "lexical_recall": round(lexical_recall, 3),
+            "grounding_verdict": "VISUAL_SCAN_EVIDENCE",
+            "heuristic_alignment_score": nli_prob,
+            "claim_evidence_verified": False,
+            "retrieval_evidence_available": True,
+            "evaluation_method": "multimodal_visual_inspection",
+            "nli_verdict": "VISUAL_SCAN_EVIDENCE",
+            "nli_entailment_prob": nli_prob,
+            "nli_method": "multimodal_visual_inspection",
+            "is_answer_bearing": True,
+            "badge": "🖼️ VISUAL SCAN • MULTIMODAL INSPECTION",
+            "reason": "Document page contains scanned visual imagery without embedded text; routing rendered page image to multimodal synthesis."
         }
 
     if nli_verdict == "NEUTRAL" and (top_dense < SIMILARITY_THRESHOLD or not nli_eval.get("is_answer_bearing", True)):

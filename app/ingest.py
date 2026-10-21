@@ -385,6 +385,7 @@ def hierarchical_chunk(
     combined_header = " ".join([p.get("text", "")[:1000] for p in pages[:2]])
     classification = classify_document(combined_header)
     default_filename = pages[0].get("filename", "Document") if pages else "Document"
+    page_meta_by_num = {p.get("page", idx + 1): p for idx, p in enumerate(pages)}
 
     # When AST is provided, derive chunks directly from AST PARAGRAPH nodes for 100% node ID & path alignment
     if ast is not None and hasattr(ast, "nodes"):
@@ -431,6 +432,8 @@ def hierarchical_chunk(
                         "materialized_path": p_node.materialized_path,
                         "image_url": img_url,
                         "has_visual": bool(img_url or linked_visuals),
+                        "is_scanned": bool(page_meta_by_num.get(page_num, {}).get("is_scanned", False)),
+                        "is_ocr": bool(page_meta_by_num.get(page_num, {}).get("is_ocr", False)),
                     }
                     if linked_visuals:
                         chunk_item["linked_visuals"] = linked_visuals
@@ -460,6 +463,8 @@ def hierarchical_chunk(
                     "materialized_path": f"root/page_{page_num}/para_{p_idx}",
                     "image_url": img_url,
                     "has_visual": bool(img_url),
+                    "is_scanned": bool(page.get("is_scanned", False)),
+                    "is_ocr": bool(page.get("is_ocr", False)),
                 })
                 chunk_id += 1
 

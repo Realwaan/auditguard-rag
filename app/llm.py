@@ -60,19 +60,27 @@ def load_image_bytes(image_url: str) -> Optional[Tuple[bytes, str]]:
         file_path = get_or_render_page_image(lazy_preview[1], int(lazy_preview[2]))
         if file_path is None:
             return None
-    elif clean_url.startswith("/static/"):
-        rel_path = clean_url[len("/static/"):]
+    elif clean_url.startswith("/static/") or clean_url.startswith("static/"):
+        import app.config as cfg
+        rel_path = clean_url[len("/static/"):] if clean_url.startswith("/static/") else clean_url[len("static/"):]
         file_path = BASE_DIR / "app" / "static" / rel_path
-    elif clean_url.startswith("static/"):
-        rel_path = clean_url[len("static/"):]
-        file_path = BASE_DIR / "app" / "static" / rel_path
+        if not file_path.exists():
+            if rel_path.startswith("previews/"):
+                file_path = cfg.PREVIEWS_DIR / rel_path[len("previews/"):]
+            elif rel_path.startswith("crops/"):
+                file_path = cfg.CROPS_DIR / rel_path[len("crops/"):]
     else:
         file_path = Path(clean_url)
         if not file_path.is_absolute():
             file_path = BASE_DIR / clean_url
 
     # Only generated visual assets may be included in model requests.
-    allowed_roots = [(BASE_DIR / "app" / "static" / name).resolve() for name in ("previews", "crops")]
+    import app.config as cfg
+    allowed_roots = [
+        *( (BASE_DIR / "app" / "static" / name).resolve() for name in ("previews", "crops") ),
+        cfg.PREVIEWS_DIR.resolve(),
+        cfg.CROPS_DIR.resolve(),
+    ]
     file_path = file_path.resolve()
     if not any(file_path.is_relative_to(root) for root in allowed_roots):
         return None

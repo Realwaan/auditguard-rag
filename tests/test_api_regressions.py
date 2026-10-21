@@ -199,3 +199,87 @@ def test_stream_warns_about_incorrect_numbers(monkeypatch):
     monkeypatch.setattr(generator, "get_openai_client", lambda: provider)
     result = "".join(stream_grounded_answer("What is uptime?", [evidence("Uptime is 99.9%.")]))
     assert "requires review" in result
+
+
+def test_scanned_image_only_pdf_end_to_end(client, monkeypatch):
+    """
+    End-to-end regression test for image-only (scanned) PDFs:
+    1. Constructs a genuine 1-page PDF containing only a bitmap image (zero embedded text streams).
+    2. Uploads it via /upload and verifies page rendering, visual preview hydration, and OCR/visual fallback.
+    3. Queries /ask and verifies visual evidence retrieval, multimodal image loading, and answer verification.
+    """
+    from PIL import Image, ImageDraw
+    from pypdf import PdfReader
+    import app.ingest as ingest
+    import app.generator as generator
+    import app.llm as llm
+
+    # 1. Build a real image-only PDF with zero text layer
+    img = Image.new("RGB", (600, 300), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([20, 20, 580, 280], outline=(0, 0, 0), width=2)
+    draw.text((40, 80), "SLA Policy: Standard support response time is 4 hours.", fill=(0, 0, 0))
+    pdf_buf = io.BytesIO()
+    img.save(pdf_buf, format="PDF")
+    pdf_bytes = pdf_buf.getvalue()
+
+    # Confirm pypdf extracts zero embedded characters (pure image-only PDF)
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    assert len(reader.pages) == 1
+    assert (reader.pages[0].extract_text() or "").strip() == ""
+
+    # 2. Simulate OCR extracting the text from the rendered page image during /upload
+    monkeypatch.setattr(
+        ingest,
+        "ocr_extract_page_image",
+        lambda pil_img: "SLA Policy: Standard support response time is 4 hours for all production tiers."
+    )
+
+    upload_res = client.post(
+        "/upload",
+        files={"file": ("scanned_sla.pdf", io.BytesIO(pdf_bytes), "application/pdf")}
+    )
+    assert upload_res.status_code == 200
+    up_data = upload_res.json()
+    assert up_data["ok"] is True
+    assert up_data["pages_processed"] == 1
+    assert up_data["total_chunks"] >= 1
+
+    # Verify visual preview was rendered and attached to the indexed chunk
+    doc_id = up_data["doc_id"]
+    vault_chunks = main.DOCUMENT_VAULT[doc_id]["chunks"]
+    assert len(vault_chunks) >= 1
+    assert vault_chunks[0]["has_visual"] is True
+    assert vault_chunks[0]["is_scanned"] is True
+    assert vault_chunks[0]["is_ocr"] is True
+    assert vault_chunks[0]["image_url"].startswith("/static/previews/")
+    loaded_img = llm.load_image_bytes(vault_chunks[0]["image_url"])
+    assert loaded_img is not None and loaded_img[1] == "image/webp" and len(loaded_img[0]) > 0
+
+    # 3. Query /ask end-to-end and verify multimodal visual context + citation verification
+    monkeypatch.setattr(generator, "USE_GOOGLE_GENAI", False)
+    seen_messages = []
+    def fake_create(**kwargs):
+        seen_messages.append(kwargs["messages"])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="Standard support response time is 4 hours [1]."))],
+            usage=SimpleNamespace(total_tokens=42)
+        )
+    provider = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    monkeypatch.setattr(generator, "get_openai_client", lambda: provider)
+
+    ask_res = client.post("/ask", json={"query": "What is the support response time?", "include_baseline": False})
+    assert ask_res.status_code == 200
+    ask_data = ask_res.json()
+    assert ask_data["status"] == "SUCCESS"
+    assert ask_data["has_multimodal_context"] is True
+    assert len(ask_data["sources"]) >= 1
+    assert ask_data["sources"][0]["has_visual"] is True
+    assert ask_data["sources"][0]["image_url"].startswith("/static/previews/")
+    assert ask_data["citation_verification"]["all_supported"] is True
+    assert ask_data["citation_verification"]["verdict"] == "VERIFIED"
+    # Confirm image_url payload was included in the multimodal LLM message content
+    user_msg_content = seen_messages[0][1]["content"]
+    assert isinstance(user_msg_content, list)
+    assert any(part.get("type") == "image_url" for part in user_msg_content)
+

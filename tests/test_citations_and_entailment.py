@@ -221,3 +221,99 @@ def test_evaluator_financial_cap_detection():
     res_with = evaluate_relevance(chunks_with_cap, query=query)
     assert res_with["status"] == "SYNTHESIZE"
     assert res_with["nli_verdict"] == "ENTAILED"
+
+
+def test_citation_verification_rejects_unsupported_units_items_vs_hours():
+    """Finding 1 regression: An unclassified/different source unit ('items') must not support 'hours'."""
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": "The SLA threshold is 8 items.",
+        "child_text": "The SLA threshold is 8 items."
+    }]
+    answer = "The SLA threshold is 8 hours [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is False
+    assert audit["verdict"] == "UNSUPPORTED_CLAIM"
+    assert audit["unsupported_count"] == 1
+    assert "unit mismatch" in audit["verified_citations"][0]["reason"].lower()
+
+
+@pytest.mark.parametrize("source_text", [
+    "Response time is 4 hours. Backups are retained for 30 days.",
+    "4 hours response time; 30 days backup retention.",
+    "Response time is 4 hours, and backups are retained for 30 days.",
+])
+def test_citation_verification_rejects_quantities_from_unrelated_statements(source_text):
+    """Finding 4 regression: A quantity from a different statement/clause cannot support the wrong metric claim."""
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": source_text,
+        "child_text": source_text
+    }]
+    answer = "Response time is 30 days [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is False
+    assert audit["verdict"] == "UNSUPPORTED_CLAIM"
+    assert audit["unsupported_count"] == 1
+    assert "statement mismatch" in audit["verified_citations"][0]["reason"].lower()
+
+
+def test_evaluator_rejects_unrelated_financial_numbers():
+    """Finding 3 regression: An unrelated year ('2024') must not satisfy a missing liability cap query."""
+    chunks = [{
+        "parent_text": "The contract begins in 2024. The liability cap has not been specified.",
+        "child_text": "The contract begins in 2024. The liability cap has not been specified.",
+        "dense_score": 0.80
+    }]
+    query = "What is the maximum liability cap?"
+    res = evaluate_relevance(chunks, query=query)
+    assert res["status"] == "REFUSE"
+    assert "NEUTRAL" in res["nli_verdict"]
+
+
+def test_citation_verification_verifies_correct_sentence_without_overwriting():
+    """Finding 2 regression: Verify the selected sentence for [1] is preserved while flagging the preceding uncited sentence."""
+    chunks = [{
+        "citation_id": 1,
+        "parent_text": "Backups are retained for 30 days in off-site encrypted storage.",
+        "child_text": "Backups are retained for 30 days"
+    }]
+    answer = "The system uses AES-256 encryption. Backups are retained for 30 days [1]."
+    audit = verify_citations_grounding(answer, chunks)
+    assert audit["all_supported"] is False
+    assert audit["verdict"] == "UNSUPPORTED_CLAIM"
+    uncited_entries = [c for c in audit["verified_citations"] if c["citation_id"] is None]
+    cited_entries = [c for c in audit["verified_citations"] if c["citation_id"] == 1]
+    assert len(uncited_entries) == 1
+    assert uncited_entries[0]["supported"] is False
+    assert "AES-256" in uncited_entries[0]["claim_excerpt"]
+    assert len(cited_entries) == 1
+    assert cited_entries[0]["supported"] is True
+    assert cited_entries[0]["claim_excerpt"] == "Backups are retained for 30 days"
+
+
+@pytest.mark.parametrize("query,source_text", [
+    (
+        "What is availability?",
+        "Availability refers to the ability of a system to remain operational and accessible when required by authorized users."
+    ),
+    (
+        "What is uptime?",
+        "Uptime is a measure of system reliability representing continuous operational status without service interruption."
+    ),
+])
+def test_evaluator_allows_conceptual_metric_questions_without_articles(query, source_text):
+    """Conceptual-question regression: Definitional queries without 'a'/'an' must not be blocked by percentage checks."""
+    chunks = [{
+        "parent_text": source_text,
+        "child_text": source_text,
+        "dense_score": 0.82
+    }]
+    res = evaluate_relevance(chunks, query=query)
+    assert res["status"] == "SYNTHESIZE"
+    assert res["nli_verdict"] == "ENTAILED"
+
+    # Value-seeking queries with 'the' still require the actual numerical metric
+    res_value = evaluate_relevance(chunks, query="What is the uptime?")
+    assert res_value["status"] == "REFUSE"
+
