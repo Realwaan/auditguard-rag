@@ -14,7 +14,8 @@ from pydantic import BaseModel
 
 from app.config import (
     DOCS_DIR, INDEX_DIR, PREVIEWS_DIR, CROPS_DIR, TOP_K,
-    USE_GOOGLE_GENAI, GEMINI_API_KEY, get_gemma_model, set_gemma_model
+    USE_GOOGLE_GENAI, GEMINI_API_KEY, get_gemma_model, set_gemma_model,
+    MAX_UPLOAD_SIZE_BYTES
 )
 from app.ingest import (
     extract_pages_from_pdf, extract_pages_from_text,
@@ -28,7 +29,7 @@ from app.embeddings import embed_texts, embed_query
 from app.retriever import HybridRetriever
 from app.evaluator import evaluate_relevance
 from app.generator import generate_grounded_answer, stream_grounded_answer
-from app.llm import call_plain_gemma
+from app.llm import call_plain_gemma, is_llm_configured
 from app.audit_scanner import run_compliance_audit
 
 app = FastAPI(title="AuditGuard RAG • Hierarchical Multimodal Tree-RAG", version="2.0.0")
@@ -90,65 +91,43 @@ def health_check():
         "chunk_count": len(ACTIVE_CHUNKS),
         "ast_loaded": ACTIVE_DOC_ID in DOCUMENT_ASTS,
         "lancedb_ready": lancedb_ready,
+        "llm_configured": is_llm_configured(),
         "model": get_gemma_model(),
         "engine": "Google GenAI (Native)" if USE_GOOGLE_GENAI else "OpenAI-Compatible (ALMA)",
         "use_google_genai": USE_GOOGLE_GENAI,
         "gemini_api_key_active": bool(GEMINI_API_KEY)
     }
 
-@app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def _ingest_document_into_vault(
+    doc_id: str,
+    filename: str,
+    pages: list[dict],
+    page_images: Optional[dict[int, str]] = None,
+    pdf_bytes: Optional[bytes] = None,
+) -> dict:
     """
-    Sub-2s Local Ingestion:
-    Extracts pages, builds the 3-Tier Document AST, extracts collision-bounded
-    halo crops, and indexes into LanceDB in-process without any upfront LLM API costs.
+    Unified, deterministic ingestion pipeline shared by /upload and /load-sample.
+    Constructs the 3-Tier AST, extracts visual/table crops, builds AST-aligned parent-child chunks,
+    indexes AST leaves into LanceDB, and updates the active knowledge vault with zero hardcoded overrides.
     """
     global ACTIVE_RETRIEVER, ACTIVE_CHUNKS, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
 
     t_start = time.perf_counter()
-    contents = await file.read()
-    filename = file.filename or "uploaded_doc.pdf"
-    content_hash = hashlib.sha256(contents).hexdigest()[:8]
-    safe_stem = "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in Path(filename).stem)
-    doc_id = f"{safe_stem}_{content_hash}"
+    if page_images is None:
+        page_images = {}
 
-    # 1. Multi-Format Document Ingestion Engine (PDF, DOCX, PPTX, TXT, MD)
-    ext = Path(filename).suffix.lower()
-    is_pdf = (ext == ".pdf")
-    page_images = {}
-
-    if is_pdf:
-        pages = extract_pages_from_pdf(contents, filename)
-        page_images = render_page_previews(contents, doc_id)
-    elif ext in (".docx", ".doc"):
-        pages = extract_pages_from_docx(contents, filename)
-    elif ext in (".pptx", ".ppt"):
-        pages = extract_pages_from_pptx(contents, filename)
-    elif ext in (".txt", ".md", ".csv", ".json", ".log"):
-        text_str = contents.decode("utf-8", errors="replace")
-        pages = extract_pages_from_text(text_str, filename)
-    else:
-        # Fallback raw text attempt
-        try:
-            text_str = contents.decode("utf-8")
-        except UnicodeDecodeError:
-            text_str = contents.decode("latin-1", errors="replace")
-        pages = extract_pages_from_text(text_str, filename)
-
-    if not pages:
-        raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
-
-    # 2. Compiler-Grade 3-Tier Document AST Construction (< 200ms)
-    ast = build_document_ast(
+    # 1. Compiler-Grade 3-Tier Document AST Construction (< 200ms)
+    ast = await asyncio.to_thread(
+        build_document_ast,
         doc_id=doc_id,
         pages=pages,
-        pdf_bytes=contents if is_pdf else None,
+        pdf_bytes=pdf_bytes,
         doc_title=filename
     )
     DOCUMENT_ASTS[doc_id] = ast
 
-    # 3. Hierarchical Chunking + Automatic Document Type Classification
-    chunks, classification = hierarchical_chunk(pages, page_images)
+    # 2. Hierarchical Chunking + Automatic Document Type Classification
+    chunks, classification = hierarchical_chunk(pages, page_images, ast=ast)
     ACTIVE_CLASSIFICATION = classification
 
     # Attach accurate AST node metadata to chunks by matching parent paragraph text
@@ -177,37 +156,40 @@ async def upload_document(file: UploadFile = File(...)):
             if not c.get("has_visual"):
                 c["has_visual"] = False
 
-    # 4. Dense Vector Embeddings (Child Sentences)
+    # 3. Dense Vector Embeddings (Child Sentences)
     child_texts = [c["child_text"] for c in chunks]
     embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
 
-    # 5. Index AST Leaves directly into LanceDB (In-Process Columnar Vector Engine)
+    # 4. Index AST Leaves directly into LanceDB (In-Process Columnar Vector Engine)
     try:
         await asyncio.to_thread(LANCE_STORE.index_ast, ast)
     except Exception as e:
         print(f"LanceDB indexing warning: {e}")
 
-    # 6. Initialize Hybrid RRF Retriever backed by LanceDB vector engine
+    # 5. Initialize Hybrid RRF Retriever backed by LanceDB vector engine
+    retriever = HybridRetriever(chunks, embeddings_matrix, lance_store=LANCE_STORE, doc_id=doc_id)
     ACTIVE_CHUNKS = chunks
-    ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix, lance_store=LANCE_STORE, doc_id=doc_id)
+    ACTIVE_RETRIEVER = retriever
     ACTIVE_DOC_ID = doc_id
 
     indexing_ms = round((time.perf_counter() - t_start) * 1000, 2)
+    cross_links_count = len(ast.get_cross_modal_links())
 
-    DOCUMENT_VAULT[doc_id] = {
+    vault_entry = {
         "doc_id": doc_id,
         "filename": filename,
         "pages": len(pages),
         "total_chunks": len(chunks),
         "total_ast_nodes": len(ast.nodes),
-        "cross_modal_links": len(ast.get_cross_modal_links()),
+        "cross_modal_links": cross_links_count,
         "indexing_duration_ms": indexing_ms,
         "classification": classification,
-        "retriever": ACTIVE_RETRIEVER,
+        "retriever": retriever,
         "ast": ast,
         "chunks": chunks,
         "uploaded_at": datetime.now().strftime("%H:%M:%S")
     }
+    DOCUMENT_VAULT[doc_id] = vault_entry
 
     return {
         "ok": True,
@@ -215,11 +197,67 @@ async def upload_document(file: UploadFile = File(...)):
         "pages_processed": len(pages),
         "total_chunks": len(chunks),
         "total_ast_nodes": len(ast.nodes),
-        "cross_modal_links": len(ast.get_cross_modal_links()),
+        "cross_modal_links": cross_links_count,
         "indexing_duration_ms": indexing_ms,
-        "classification": ACTIVE_CLASSIFICATION,
+        "classification": classification,
         "doc_id": doc_id
     }
+
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """
+    Sub-2s Local Ingestion:
+    Extracts pages, builds the 3-Tier Document AST, extracts collision-bounded
+    halo crops, and indexes into LanceDB in-process without any upfront LLM API costs.
+    """
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    filename = (file.filename or "uploaded_doc.pdf").strip()
+    allowed_exts = (".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".csv", ".json", ".log")
+    if not filename.lower().endswith(allowed_exts):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format. Please upload a supported format ({', '.join(allowed_exts)})."
+        )
+
+    content_hash = hashlib.sha256(contents).hexdigest()[:8]
+    safe_stem = "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in Path(filename).stem)
+    doc_id = f"{safe_stem}_{content_hash}"
+
+    # 1. Multi-Format Document Ingestion Engine (PDF, DOCX, PPTX, TXT, MD)
+    ext = Path(filename).suffix.lower()
+    is_pdf = (ext == ".pdf")
+    page_images = {}
+
+    if is_pdf:
+        pages = await asyncio.to_thread(extract_pages_from_pdf, contents, filename)
+        page_images = await asyncio.to_thread(render_page_previews, contents, doc_id)
+    elif ext in (".docx", ".doc"):
+        pages = await asyncio.to_thread(extract_pages_from_docx, contents, filename)
+    elif ext in (".pptx", ".ppt"):
+        pages = await asyncio.to_thread(extract_pages_from_pptx, contents, filename)
+    elif ext in (".txt", ".md", ".csv", ".json", ".log"):
+        text_str = contents.decode("utf-8", errors="replace")
+        pages = extract_pages_from_text(text_str, filename)
+    else:
+        try:
+            text_str = contents.decode("utf-8")
+        except UnicodeDecodeError:
+            text_str = contents.decode("latin-1", errors="replace")
+        pages = extract_pages_from_text(text_str, filename)
+
+    if not pages:
+        raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
+
+    return await _ingest_document_into_vault(
+        doc_id=doc_id,
+        filename=filename,
+        pages=pages,
+        page_images=page_images,
+        pdf_bytes=contents if is_pdf else None,
+    )
 
 class ExportReportRequest(BaseModel):
     query: str
@@ -438,6 +476,7 @@ async def ask_question(payload: QueryRequest):
             "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
             "estimated_tokens": 0,
             "tokens": 0,
+            "token_telemetry": {"tokens": 0, "estimated": False},
             "is_fallback": False,
             "model": payload.model or get_gemma_model(),
             "doc_id": target_doc_id
@@ -496,6 +535,7 @@ async def ask_question(payload: QueryRequest):
         "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
         "estimated_tokens": reported_tokens,
         "tokens": reported_tokens,
+        "token_telemetry": {"tokens": reported_tokens, "estimated": reported_tokens == estimated_tokens},
         "is_fallback": is_fallback,
         "model": model_used,
         "doc_id": target_doc_id,
@@ -651,99 +691,15 @@ Either party may terminate this agreement without cause by providing at least 30
     
     sample_path.write_text(sample_content, encoding="utf-8")
     sample_doc_id = "sample_enterprise_sop"
-
-    t0 = time.perf_counter()
     pages = extract_pages_from_text(sample_content, "sample_enterprise_sop.txt")
-    chunks, classification = hierarchical_chunk(pages)
-    
-    # Build Document AST
-    ast = build_document_ast(sample_doc_id, pages, doc_title="Enterprise SLA & SOP")
-    
-    # Add explicit Table 1 Visual Node to simulate visual crop
-    table_node = ASTNode(
-        id=f"{sample_doc_id}_vis_table_1",
-        type=ASTNodeType.VISUAL,
-        title="Table 1: Q3 Historical Availability & Outage Log",
-        text="Historical Uptime Log: September availability declined to 98.20% (Breach). Penalty credit of 15% triggered.",
-        page=1,
-        materialized_path="root/sec_2/table_1",
-        image_url="/static/previews/sample_enterprise_sop_page_1.webp",
-        visual_type="table",
-        confidence=0.98
+
+    return await _ingest_document_into_vault(
+        doc_id=sample_doc_id,
+        filename="sample_enterprise_sop.txt",
+        pages=pages,
+        page_images={},
+        pdf_bytes=None,
     )
-    ast.add_node(table_node, parent_id=f"{sample_doc_id}_sec_2")
-
-    # Wire cross-modal sibling link to Paragraph 2.1
-    p2 = [n for n in ast.nodes.values() if "99.9%" in n.text and n.type == ASTNodeType.PARAGRAPH]
-    if p2:
-        p2[0].linked_node_ids.append(table_node.id)
-        table_node.linked_node_ids.append(p2[0].id)
-        p2[0].metadata["link_tier"] = 1
-        p2[0].metadata["link_weight"] = 1.0
-
-    # Attach AST node metadata to chunks
-    para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
-    for c in chunks:
-        p_text = c.get("parent_text", "").strip()
-        matched = next((n for n in para_nodes if (p_text[:50] in n.text or n.text[:50] in p_text)), None)
-        if matched:
-            c["ast_node_id"] = matched.id
-            c["materialized_path"] = matched.materialized_path
-            c["linked_node_ids"] = list(matched.linked_node_ids)
-            if matched.linked_node_ids and not c.get("image_url"):
-                v_node = ast.get_node(matched.linked_node_ids[0])
-                if v_node and v_node.image_url:
-                    c["image_url"] = v_node.image_url
-                    c["has_visual"] = True
-        else:
-            c["ast_node_id"] = None
-            c["materialized_path"] = "unresolved"
-            c["linked_node_ids"] = []
-            if not c.get("has_visual"):
-                c["has_visual"] = False
-
-    DOCUMENT_ASTS[sample_doc_id] = ast
-    ACTIVE_CLASSIFICATION = classification
-    ACTIVE_CHUNKS = chunks
-
-    child_texts = [c["child_text"] for c in chunks]
-    embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
-    ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix, lance_store=LANCE_STORE, doc_id=sample_doc_id)
-    ACTIVE_DOC_ID = sample_doc_id
-
-    try:
-        await asyncio.to_thread(LANCE_STORE.index_ast, ast)
-    except Exception as e:
-        print(f"LanceDB index error: {e}")
-
-    indexing_ms = round((time.perf_counter() - t0) * 1000, 2)
-
-    DOCUMENT_VAULT[sample_doc_id] = {
-        "doc_id": sample_doc_id,
-        "filename": "sample_enterprise_sop.txt",
-        "pages": len(pages),
-        "total_chunks": len(chunks),
-        "total_ast_nodes": len(ast.nodes),
-        "cross_modal_links": len(ast.get_cross_modal_links()),
-        "indexing_duration_ms": indexing_ms,
-        "classification": classification,
-        "retriever": ACTIVE_RETRIEVER,
-        "ast": ast,
-        "chunks": chunks,
-        "uploaded_at": datetime.now().strftime("%H:%M:%S")
-    }
-
-    return {
-        "ok": True,
-        "filename": "sample_enterprise_sop.txt",
-        "doc_id": sample_doc_id,
-        "pages_processed": len(pages),
-        "total_chunks": len(chunks),
-        "total_ast_nodes": len(ast.nodes),
-        "cross_modal_links": len(ast.get_cross_modal_links()),
-        "indexing_duration_ms": indexing_ms,
-        "classification": ACTIVE_CLASSIFICATION
-    }
 
 @app.on_event("startup")
 async def startup_event():

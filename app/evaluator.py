@@ -277,3 +277,38 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
         "badge": badge_label,
         "reason": reason_text
     }
+
+
+def verify_generated_answer(
+    answer: str,
+    retrieved_chunks: List[Dict[str, Any]],
+    eval_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Post-Generation Guardrail:
+    1. Detects if the LLM itself refused because the retrieved chunks lacked the specific answer.
+    2. Audits all inline citation markers [1], [2], etc. against the retrieved chunk IDs.
+    """
+    updated = dict(eval_result)
+    if not answer:
+        return updated
+
+    ans_lower = answer.strip().lower()
+    if "i cannot verify this information in the provided document excerpts" in ans_lower:
+        updated["status"] = "REFUSE"
+        updated["nli_verdict"] = "NEUTRAL (UNVERIFIABLE)"
+        updated["grounding_verdict"] = "UNVERIFIABLE"
+        updated["claim_evidence_verified"] = False
+        updated["badge"] = f"⚠️ UNVERIFIABLE IN EXCERPTS ({updated.get('confidence', 0.0)}% Retrieval)"
+        updated["reason"] = "Retrieved excerpts were topically related but did not contain verifiable facts to answer this specific question."
+        return updated
+
+    valid_ids = {int(c.get("citation_id", idx + 1)) for idx, c in enumerate(retrieved_chunks)}
+    cited_raw = [int(m) for m in re.findall(r'\[(\d+)\]', answer)]
+    verified_citations = sorted(list({cid for cid in cited_raw if cid in valid_ids}))
+    invalid_citations = sorted(list({cid for cid in cited_raw if cid not in valid_ids}))
+
+    updated["verified_citations"] = verified_citations
+    updated["invalid_citations"] = invalid_citations
+    updated["citation_verified"] = len(verified_citations) > 0 and len(invalid_citations) == 0
+    return updated

@@ -129,3 +129,62 @@ def test_build_document_ast_pipeline():
     summarized_sec = [s for s in sec_nodes if "thematic_summary" in s.metadata]
     assert len(summarized_sec) >= 1
     assert len(summarized_sec[0].metadata["thematic_summary"]) > 0
+
+
+def test_table_visual_node_not_duplicated_as_paragraph():
+    """Verify that Markdown tables create a VISUAL node without creating a duplicate PARAGRAPH node."""
+    sample_pages = [
+        {
+            "page": 1,
+            "text": (
+                "## 2. SYSTEM UPTIME & SLA\n"
+                "Uptime commitment is 99.9% as reported in Table 1.\n\n"
+                "Table 1: Monthly Availability Log\n"
+                "| Month | Target | Actual |\n"
+                "| July | 99.9% | 99.95% |\n"
+                "| Sept | 99.9% | 98.20% |\n"
+            )
+        }
+    ]
+    ast = build_document_ast("table_dedup_test", sample_pages)
+    
+    # Exactly one visual table node should exist
+    vis_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.VISUAL]
+    assert len(vis_nodes) == 1
+    assert "Table 1" in vis_nodes[0].title
+    assert "98.20%" in vis_nodes[0].text
+
+    # The paragraph nodes should NOT include a duplicate copy of the table text
+    para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
+    assert len(para_nodes) == 1
+    assert "Uptime commitment is 99.9%" in para_nodes[0].text
+    assert not any("Monthly Availability Log" in p.text and "| July |" in p.text for p in para_nodes)
+
+
+def test_slide_deck_numbered_dash_sections():
+    """Verify that slide decks using '1-1: Agenda' and '2-1: System Overview' branch into distinct sections."""
+    sample_pages = [
+        {
+            "page": 1,
+            "text": "1-1: Executive Overview\nWelcome to the operational review meeting."
+        },
+        {
+            "page": 2,
+            "text": "2-1: Microservice Architecture\nDetailed diagrams of the streaming ingestion cluster."
+        },
+        {
+            "page": 3,
+            "text": "3-1: Compliance Audit Results\nFinal scorecard across all seven SOC2 criteria."
+        }
+    ]
+    ast = build_document_ast("slide_deck_test", sample_pages)
+
+    sec_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.SECTION]
+    sec_titles = [s.title for s in sec_nodes]
+
+    # Must produce 3 separate sections rather than collapsing under a single default section
+    assert len(sec_nodes) == 3
+    assert any("1-1: Executive Overview" in t for t in sec_titles)
+    assert any("2-1: Microservice Architecture" in t for t in sec_titles)
+    assert any("3-1: Compliance Audit Results" in t for t in sec_titles)
+

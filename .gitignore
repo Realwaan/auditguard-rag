@@ -10,4 +10,6 @@ data/docs/*
 !data/docs/sample_enterprise_sop.txt
 app/static/previews/*
 !app/static/previews/.gitkeep
+app/static/crops/*
+!app/static/crops/.gitkeep
 .pytest_cache/

@@ -16,6 +16,10 @@ try:
 except ImportError:
     _HAS_GENAI = False
 
+def is_llm_configured() -> bool:
+    """Returns True if Google GenAI key or custom OpenAI endpoint is configured."""
+    return bool((USE_GOOGLE_GENAI and GEMINI_API_KEY) or (LLM_API_KEY and LLM_API_KEY != "local-or-alma-key") or LLM_BASE_URL)
+
 def get_genai_client():
     if _HAS_GENAI and GEMINI_API_KEY:
         return genai.Client(api_key=GEMINI_API_KEY)

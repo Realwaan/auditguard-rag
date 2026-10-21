@@ -99,38 +99,6 @@ pytest tests -v
 LLM_BASE_URL=http://localhost:11434/v1
 LLM_MODEL=gemma-4
 LLM_API_KEY=alma-hackathon-token
-SIMILARITY_THRESHOLD=0.50
-TOP_K=4
-DEFAULT_EMBED_MODEL=BAAI/bge-small-en-v1.5
-```
-On hackathon morning, simply configure `LLM_BASE_URL` with ALMA's private inference endpoint.
-- Chrome or modern browser
-
-### 2. Start Application
-Simply double-click `run.bat` or run:
-```powershell
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-Open **[http://127.0.0.1:8000](http://127.0.0.1:8000)** in your browser.
-
-### 3. Load Sample SOP (1-Click)
-Click **"Load Sample SOP"** in the top navigation bar to instantly index a sample Enterprise IT & Security SLA agreement.
-
----
-
-## 🧪 Testing
-Run the comprehensive test suite verifying the classifier and hybrid retrieval pipeline:
-```powershell
-pytest tests -v
-```
-
----
-
-## 🔑 Gemma 4 Configuration (`.env`)
-```ini
-LLM_BASE_URL=http://localhost:11434/v1
-LLM_MODEL=gemma-4
-LLM_API_KEY=alma-hackathon-token
 SIMILARITY_THRESHOLD=0.58
 TOP_K=4
 DEFAULT_EMBED_MODEL=BAAI/bge-small-en-v1.5

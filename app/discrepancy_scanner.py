@@ -17,44 +17,127 @@ from app.config import (
     LLM_MODEL, LLM_API_KEY, USE_GOOGLE_GENAI, GEMINI_API_KEY, get_gemma_model
 )
 
+GROWTH_PATTERN = re.compile(
+    r'\b(?:growth|grew|increased|increases|surged|expanded|improved|gain|gains|rose|risen)\b',
+    re.IGNORECASE
+)
+DECLINE_PATTERN = re.compile(
+    r'\b(?:decline|declined|dropped|fell|decreased|decreases|loss|contraction|shrank|downturn)\b|(?<!\w)-\d+(?:\.\d+)?\s*%',
+    re.IGNORECASE
+)
+PCT_PATTERN = re.compile(r'(-?\d+(?:\.\d+)?)\s*%')
+
+
+def _analyze_pipe_table_vs_claim(text: str, visual_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Parses pipe-delimited Markdown tables in visual_text and checks whether any row
+    contradicts or breaches a numerical/percentage guarantee stated in the prose paragraph.
+    """
+    text_pcts = [float(x) for x in PCT_PATTERN.findall(text)]
+    if not text_pcts:
+        return None
+
+    lines = [ln.strip() for ln in visual_text.splitlines() if ln.strip().startswith("|")]
+    if len(lines) < 2:
+        return None
+
+    headers = [c.strip().lower() for c in lines[0].strip("|").split("|")]
+    # Identify target/SLA column vs actual/recorded column if present
+    actual_col_idx = None
+    for idx, h in enumerate(headers):
+        if any(k in h for k in ("actual", "recorded", "observed", "measured", "result", "performance")):
+            actual_col_idx = idx
+            break
+
+    claimed_pct = text_pcts[0]
+    breach_rows = []
+
+    for row_line in lines[1:]:
+        if re.match(r'^\|[\s\-:|]+\|$', row_line):
+            continue
+        cells = [c.strip() for c in row_line.strip("|").split("|")]
+        if not cells:
+            continue
+
+        row_label = cells[0]
+        if actual_col_idx is not None and actual_col_idx < len(cells):
+            cell_pcts = [float(x) for x in PCT_PATTERN.findall(cells[actual_col_idx])]
+            if cell_pcts:
+                actual_val = cell_pcts[0]
+                delta = round(abs(claimed_pct - actual_val), 2)
+                if delta >= 0.5 or "breach" in row_line.lower():
+                    breach_rows.append((row_label, actual_val, delta, row_line))
+        else:
+            row_pcts = [float(x) for x in PCT_PATTERN.findall(row_line)]
+            for val in row_pcts:
+                if val > 0 and abs(claimed_pct - val) >= 1.0 and val != claimed_pct:
+                    breach_rows.append((row_label, val, round(abs(claimed_pct - val), 2), row_line))
+
+    if breach_rows:
+        # Select the most severe deviation row
+        worst_label, worst_val, worst_delta, worst_raw = max(breach_rows, key=lambda x: x[2])
+        return {
+            "status": "CONTRADICTION",
+            "title": f"Table Metric Variance ({worst_label})",
+            "text_claim": text.strip()[:160],
+            "visual_fact": f"{worst_label}: {worst_val}% recorded in table ({worst_raw})",
+            "discrepancy_delta": (
+                f"Prose specifies {claimed_pct}%, whereas linked table records {worst_val}% "
+                f"for {worst_label} (variance of {worst_delta:.2f}%)."
+            ),
+            "confidence": 0.94,
+        }
+
+    return None
+
 
 def detect_heuristic_discrepancy(text: str, visual_text: str) -> Optional[Dict[str, Any]]:
     """
-    Fast local heuristic scanner to detect blatant text-vs-visual contradictions
-    (e.g., text says 'increased by 15%', but visual says 'declined').
-    Uses strict word boundaries and filters out false positives like 'uptime' or hyphens.
+    Deterministic cross-modal verifier to detect text-vs-visual contradictions:
+    1. Directional polarity conflict (prose claims growth/surge while visual reports decline/negative %);
+    2. Structured table row breach against prose SLA/target percentage;
+    3. Direct percentage variance between prose claim and chart figures.
+    Uses strict word-boundary regexes to prevent false positives on substrings.
     """
-    text_lower = text.lower()
-    vis_lower = visual_text.lower()
+    if not text or not visual_text:
+        return None
 
-    # Pattern 1: Growth claim vs Negative/Decline visual data using exact word boundaries
-    growth_keywords = [r'\bgrowth\b', r'\bincreased\b', r'\bsurged\b', r'\bexpanded\b', r'\bimproved\b', r'\bgain\b']
-    decline_keywords = [r'\bdecline\b', r'\bdeclined\b', r'\bdropped\b', r'\bfell\b', r'\bdecreased\b', r'\bloss\b', r'\bcontraction\b', r'\bdownturn\b']
-
-    text_claims_growth = any(re.search(k, text_lower) for k in growth_keywords)
-    vis_shows_decline = any(re.search(k, vis_lower) for k in decline_keywords)
+    # Pattern 1: Directional Growth Claim vs Negative/Decline Visual Data (whole-word matched)
+    text_claims_growth = bool(GROWTH_PATTERN.search(text))
+    vis_shows_decline = bool(DECLINE_PATTERN.search(visual_text))
 
     if text_claims_growth and vis_shows_decline:
+        text_pcts = PCT_PATTERN.findall(text)
+        vis_pcts = PCT_PATTERN.findall(visual_text)
+        delta_detail = "Text reports positive growth/expansion while linked visual data reflects a contraction/decline."
+        if text_pcts and vis_pcts:
+            delta_detail = (
+                f"Prose claims positive growth ({text_pcts[0]}%), whereas linked visual reports "
+                f"decline/contraction ({', '.join(p + '%' for p in vis_pcts[:3])})."
+            )
         return {
             "status": "CONTRADICTION",
             "title": "Growth Metric Mismatch",
-            "text_claim": "Author text claims positive growth/expansion.",
-            "visual_fact": "Linked visual data indicates a decline or contraction.",
-            "discrepancy_delta": "Text reports growth while linked visual data reflects a contraction.",
+            "text_claim": text.strip()[:160],
+            "visual_fact": visual_text.strip()[:160],
+            "discrepancy_delta": delta_detail,
             "confidence": 0.88
         }
 
-    # Pattern 2: Explicit percentage conflict on matching metric terms
-    pct_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*%')
-    text_pcts = pct_pattern.findall(text)
-    vis_pcts = pct_pattern.findall(visual_text)
+    # Pattern 2: Structured Table Row Breach against Prose SLA / Guarantee
+    table_breach = _analyze_pipe_table_vs_claim(text, visual_text)
+    if table_breach:
+        return table_breach
+
+    # Pattern 3: Explicit percentage conflict on matching metric terms
+    text_pcts = PCT_PATTERN.findall(text)
+    vis_pcts = PCT_PATTERN.findall(visual_text)
     if text_pcts and vis_pcts:
         metric_tokens = {"uptime", "availability", "growth", "margin", "accuracy", "error", "sla", "penalty"}
-        shared_tokens = {w for w in metric_tokens if re.search(r'\b' + re.escape(w) + r'\b', text_lower) and re.search(r'\b' + re.escape(w) + r'\b', vis_lower)}
+        shared_tokens = {w for w in metric_tokens if re.search(r'\b' + re.escape(w) + r'\b', text.lower()) and re.search(r'\b' + re.escape(w) + r'\b', visual_text.lower())}
         if shared_tokens:
             t_val = float(text_pcts[0])
             v_val = float(vis_pcts[0])
-            # Strict 0.5% tolerance for uptime/SLA vs 2.0% for business metrics
             tolerance = 0.5 if any(m in shared_tokens for m in ["uptime", "availability", "sla"]) else 2.0
             if abs(t_val - v_val) >= tolerance:
                 metric_name = list(shared_tokens)[0].capitalize()
@@ -221,6 +304,7 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
     findings: List[Dict[str, Any]] = []
     links = ast.get_cross_modal_links()
 
+    pairs_to_audit = []
     for link in links:
         source_node = ast.get_node(link["source_id"])
         target_node = ast.get_node(link["target_id"])
@@ -232,8 +316,19 @@ def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[s
         v_node = target_node if target_node.type == ASTNodeType.VISUAL else source_node
 
         if p_node.type == ASTNodeType.PARAGRAPH and v_node.type == ASTNodeType.VISUAL:
-            audit_item = audit_cross_modal_pair(p_node, v_node, use_llm=use_llm)
-            findings.append(audit_item)
+            pairs_to_audit.append((p_node, v_node))
+
+    # Filter out synthetic mirror paragraphs (where p_node.text == v_node.text) if v_node is also linked to real prose
+    visual_prose_counts: Dict[str, int] = {}
+    for p_node, v_node in pairs_to_audit:
+        if p_node.text.strip() != v_node.text.strip():
+            visual_prose_counts[v_node.id] = visual_prose_counts.get(v_node.id, 0) + 1
+
+    for p_node, v_node in pairs_to_audit:
+        if p_node.text.strip() == v_node.text.strip() and visual_prose_counts.get(v_node.id, 0) > 0:
+            continue
+        audit_item = audit_cross_modal_pair(p_node, v_node, use_llm=use_llm)
+        findings.append(audit_item)
 
     contradictions_count = sum(1 for f in findings if f["status"] in ("CONTRADICTION", "VERIFIED_CONTRADICTION"))
     caution_count = sum(1 for f in findings if f["status"] == "CAUTION")

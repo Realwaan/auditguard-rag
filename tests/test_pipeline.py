@@ -63,6 +63,33 @@ def test_compliance_audit_scanner():
     assert "+ " in first_gap["redline_diff"]
     assert "action_plan" in first_gap
 
+    # Verify a clause that explicitly negates uptime guarantee fails substance verification
+    from app.audit_scanner import verify_control_substance, DEFAULT_COMPLIANCE_CHECKS
+    sla_check = DEFAULT_COMPLIANCE_CHECKS[0]
+    negated = verify_control_substance("The vendor provides no uptime guarantee and operates best effort only.", sla_check)
+    assert negated["substantive_pass"] is False
+
+def test_post_generation_guardrail_verification():
+    from app.evaluator import verify_generated_answer
+    retrieved = [{"citation_id": 1, "parent_text": "Uptime is 99.9%"}, {"citation_id": 2, "parent_text": "Penalty is 15%"}]
+    initial = {"status": "SYNTHESIZE", "confidence": 82.0, "badge": "🛡️ GROUNDED"}
+
+    # Valid citation [1] and [2]
+    v_ok = verify_generated_answer("The uptime is 99.9% [1] with a 15% credit [2].", retrieved, initial)
+    assert v_ok["status"] == "SYNTHESIZE"
+    assert v_ok["verified_citations"] == [1, 2]
+    assert v_ok["invalid_citations"] == []
+    assert v_ok["citation_verified"] is True
+
+    # Hallucinated citation [9]
+    v_bad = verify_generated_answer("The uptime is 99.9% [1] and [9].", retrieved, initial)
+    assert v_bad["invalid_citations"] == [9]
+    assert v_bad["citation_verified"] is False
+
+    # LLM explicit refusal flips status to REFUSE
+    v_ref = verify_generated_answer("I cannot verify this information in the provided document excerpts.", retrieved, initial)
+    assert v_ref["status"] == "REFUSE"
+
 def test_nli_entailment_evaluator():
     from app.evaluator import evaluate_relevance
     # Entailed chunk

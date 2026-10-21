@@ -10,49 +10,63 @@ DEFAULT_COMPLIANCE_CHECKS = [
         "category": "Service Level Agreement",
         "title": "Minimum Service Uptime Guarantee",
         "query": "What is the guaranteed service availability or uptime percentage?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["uptime", "availability", "99", "sla", "guarantee", "guarantees"],
+        "disqualifying_phrases": ["no uptime guarantee", "no availability guarantee", "best effort only", "as-is without"]
     },
     {
         "id": "PEN-02",
         "category": "Commercial Risk",
         "title": "Breach Penalty & Invoice Credit Clause",
         "query": "What penalty credit or invoice discount applies if availability drops?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["penalty", "credit", "invoice", "discount", "billing"],
+        "disqualifying_phrases": ["no penalty", "no billing credit", "waives all credits", "non-refundable"]
     },
     {
         "id": "SEC-03",
         "category": "Data Security & Access",
         "title": "Zero-Trust & Hardware-Enforced MFA",
         "query": "What are the rules for credential storage, MFA, and access control?",
-        "criticality": "CRITICAL"
+        "criticality": "CRITICAL",
+        "required_terms": ["mfa", "sso", "credentials", "authentication", "access"],
+        "disqualifying_phrases": ["without mfa", "mfa is optional", "may store credentials on local", "ban mfa", "prohibit mfa", "no mfa"]
     },
     {
         "id": "INC-04",
         "category": "Operational Resilience",
         "title": "Incident Escalation Notification Timeline",
         "query": "What are the mandatory logging and notification steps for security alerts?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["incident", "escalation", "minutes", "hour", "logged", "notice", "alert"],
+        "disqualifying_phrases": ["no notification required", "at vendor discretion"]
     },
     {
         "id": "FIN-05",
         "category": "Financial Controls",
         "title": "Dual Executive Sign-off for Wire Transfers",
         "query": "What is the dollar threshold requiring dual authorization for wire disbursements?",
-        "criticality": "MEDIUM"
+        "criticality": "MEDIUM",
+        "required_terms": ["wire", "dual", "authorization", "disbursements", "sign-off", "cfo"],
+        "disqualifying_phrases": ["single signature", "no dual authorization", "solely by virtual assistant"]
     },
     {
         "id": "BCP-06",
         "category": "Business Continuity",
         "title": "Disaster Recovery RTO & Off-site Failover",
         "query": "What is the disaster recovery failover timeline and recovery time objective RTO?",
-        "criticality": "HIGH"
+        "criticality": "HIGH",
+        "required_terms": ["disaster", "recovery", "rto", "failover", "standby"],
+        "disqualifying_phrases": ["no disaster recovery", "no failover"]
     },
     {
         "id": "ESG-07",
         "category": "Regulatory & ESG",
         "title": "Carbon Emission Offsets & Environmental Quota",
         "query": "What are the greenhouse gas carbon emission offset metrics and environmental reporting targets?",
-        "criticality": "MEDIUM"
+        "criticality": "MEDIUM",
+        "required_terms": ["carbon", "emission", "emissions", "ghg", "environmental", "offset", "offsets"],
+        "disqualifying_phrases": ["exempt from environmental", "no carbon reporting"]
     }
 ]
 
@@ -109,6 +123,56 @@ def generate_redline_diff(original_text: str, target_clause: str, control_id: st
     )
     return "".join(diff)
 
+def verify_control_substance(excerpt: str, check: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Verifies that a retrieved excerpt actually addresses the compliance control substance
+    rather than merely sharing superficial embedding similarity, and checks for disqualifying negations.
+    """
+    if not excerpt or not excerpt.strip():
+        return {"substantive_pass": False, "matched_terms": [], "reason": "Empty clause excerpt."}
+
+    excerpt_lower = excerpt.lower()
+    for bad_phrase in check.get("disqualifying_phrases", []):
+        if bad_phrase in excerpt_lower:
+            return {
+                "substantive_pass": False,
+                "matched_terms": [],
+                "reason": f"Clause explicitly negates control requirement ('{bad_phrase}')."
+            }
+
+    # Control specific negation heuristics
+    if check["id"] == "SLA-01" and re.search(r'\b(0%|zero\s*percent|no\s+uptime|does\s+not\s+guarantee|no\s+guarantee|best\s+effort\s+only)\b', excerpt_lower):
+        return {
+            "substantive_pass": False,
+            "matched_terms": [],
+            "reason": "Document explicitly disclaims or negates uptime availability."
+        }
+    if check["id"] == "SEC-03" and re.search(r'\b(ban\s+mfa|prohibit\s+mfa|no\s+mfa|without\s+mfa|prohibits\s+mfa)\b', excerpt_lower):
+        return {
+            "substantive_pass": False,
+            "matched_terms": [],
+            "reason": "Document explicitly bans or excludes mandatory MFA controls."
+        }
+    if check["id"] == "PEN-02" and re.search(r'\b(no\s+penalty|no\s+credit|no\s+liability|penalties\s+waived)\b', excerpt_lower):
+        return {
+            "substantive_pass": False,
+            "matched_terms": [],
+            "reason": "Document waives or disclaims contractual breach credits."
+        }
+
+    req_terms = check.get("required_terms", [])
+    if req_terms:
+        matched = [t for t in req_terms if re.search(r'\b' + re.escape(t) + r'\b', excerpt_lower)]
+        if not matched:
+            return {
+                "substantive_pass": False,
+                "matched_terms": [],
+                "reason": f"Clause lacks required control terms ({', '.join(req_terms[:3])})."
+            }
+        return {"substantive_pass": True, "matched_terms": matched, "reason": "Control substance verified."}
+
+    return {"substantive_pass": True, "matched_terms": [], "reason": "Substance verified."}
+
 def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
     """
     Executes an automated multi-point pre-flight compliance audit across the active document.
@@ -124,27 +188,17 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
         eval_res = evaluate_relevance(retrieved, query=check["query"])
         remediation = COMPLIANCE_REMEDIATION_PLAYBOOK.get(check["id"], {})
 
-        # Negation / Non-Compliance clause check
-        is_negated = False
-        negation_reason = ""
-        if retrieved:
-            first_text = retrieved[0].get("parent_text", retrieved[0].get("child_text", "")).lower()
-            if check["id"] == "SLA-01" and re.search(r'\b(0%|zero\s*percent|no\s+uptime|does\s+not\s+guarantee|no\s+guarantee)\b', first_text):
-                is_negated = True
-                negation_reason = "Document explicitly disclaims or negates uptime availability."
-            elif check["id"] == "SEC-03" and re.search(r'\b(ban\s+mfa|prohibit\s+mfa|no\s+mfa|without\s+mfa|prohibits\s+mfa)\b', first_text):
-                is_negated = True
-                negation_reason = "Document explicitly bans or excludes mandatory MFA controls."
-            elif check["id"] == "PEN-02" and re.search(r'\b(no\s+penalty|no\s+credit|no\s+liability|penalties\s+waived)\b', first_text):
-                is_negated = True
-                negation_reason = "Document waives or disclaims contractual breach credits."
+        first_text = retrieved[0].get("parent_text", retrieved[0].get("child_text", "")) if retrieved else ""
+        substance = verify_control_substance(first_text, check)
+        is_negated = not substance["substantive_pass"]
+        negation_reason = substance["reason"]
 
         if eval_res["status"] == "SYNTHESIZE" and not is_negated:
             best_chunk = retrieved[0]
             excerpt = best_chunk.get("parent_text", best_chunk.get("child_text", ""))
             clean_excerpt = excerpt.split("\n")[0].strip()
-            if len(clean_excerpt) > 110:
-                clean_excerpt = clean_excerpt[:107] + "..."
+            if len(clean_excerpt) > 130:
+                clean_excerpt = clean_excerpt[:127] + "..."
 
             passed_count += 1
             results.append({
@@ -152,18 +206,19 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "control": check["title"],
                 "category": check["category"],
                 "title": check["title"],
-                "criticality": check["criticality"],
+                "criticality": check.get("criticality", "MEDIUM"),
                 "status": "PASS",
                 "badge": "✅ PASS",
                 "confidence": eval_res["confidence"],
-                "excerpt": clean_excerpt,
+                "matched_terms": substance["matched_terms"],
                 "clause_excerpt": clean_excerpt,
+                "excerpt": clean_excerpt,
                 "evidence": clean_excerpt,
                 "full_clause": excerpt,
                 "page": best_chunk.get("page", 1),
                 "image_url": best_chunk.get("image_url", ""),
                 "citation_id": best_chunk.get("citation_id", 1),
-                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence.",
+                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence (matched: {', '.join(substance['matched_terms'][:3])}).",
                 "remediation_clause": "Compliant with enterprise standard. No remediation required.",
                 "redline_diff": None,
                 "diff": None,
@@ -176,20 +231,22 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
             action = remediation.get("action_required", "Remediation insertion required.")
             rationale = remediation.get("rationale", "Mandatory compliance clause.")
             redline = generate_redline_diff("", std_clause, check["id"])
-            finding_text = f"NON-COMPLIANCE DETECTED: {negation_reason}" if is_negated else f"HIGH AUDIT RISK: {action}"
+            finding_text = f"NON-COMPLIANCE DETECTED: {negation_reason}" if (is_negated and first_text) else f"HIGH AUDIT RISK: {action}"
 
+            gap_clause_desc = negation_reason if (is_negated and first_text) else "Clause missing from active document or fails compliance verification."
             results.append({
                 "id": check["id"],
                 "control": check["title"],
                 "category": check["category"],
                 "title": check["title"],
-                "criticality": check["criticality"],
+                "criticality": check.get("criticality", "MEDIUM"),
                 "status": "GAP",
                 "badge": "❌ GAP DETECTED",
                 "confidence": eval_res["confidence"],
-                "excerpt": "Clause missing from active document or fails compliance verification.",
-                "clause_excerpt": "Clause missing from active document or fails compliance verification.",
-                "evidence": "Clause missing from active document or fails compliance verification.",
+                "matched_terms": substance["matched_terms"],
+                "excerpt": gap_clause_desc,
+                "clause_excerpt": gap_clause_desc,
+                "evidence": gap_clause_desc,
                 "full_clause": "",
                 "page": None,
                 "image_url": "",

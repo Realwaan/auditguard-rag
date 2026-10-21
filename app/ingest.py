@@ -4,8 +4,14 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from pypdf import PdfReader
 import pypdfium2 as pdfium
-from app.config import PREVIEWS_DIR
+from app.config import PREVIEWS_DIR, DOCS_DIR
 from app.classifier import classify_document
+
+def sanitize_doc_id(raw_id: str) -> str:
+    """Sanitizes document identifiers to prevent path traversal or injection."""
+    cleaned = re.sub(r'[^a-zA-Z0-9_-]', '_', Path(raw_id).stem)
+    cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+    return cleaned or "document"
 
 def get_or_render_page_image(doc_prefix: str, page_num: int) -> Path | None:
     """
@@ -336,45 +342,122 @@ def extract_pages_from_pptx(pptx_bytes: bytes, filename: str) -> List[Dict[str, 
         pages.append({"filename": filename, "page": 1, "text": "Empty presentation."})
     return pages
 
-def hierarchical_chunk(pages: List[Dict[str, Any]], page_images: Dict[int, str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def _split_into_child_units(para: str) -> List[str]:
     """
-    Implements Small-to-Big (Parent-Child) chunking.
-    Child sentences are indexed for precise vector matching.
+    Splits a parent paragraph or table block into fine-grained child search units.
+    - For Markdown/pipe tables: pairs header context with each row so individual row lookups retain column names.
+    - For prose paragraphs: splits into sentences while preserving bullet items.
+    """
+    lines = [ln.strip() for ln in para.splitlines() if ln.strip()]
+    pipe_lines = [ln for ln in lines if ln.startswith("|")]
+    if len(pipe_lines) >= 2:
+        title_prefix = lines[0] if not lines[0].startswith("|") else ""
+        header_row = pipe_lines[0]
+        units = [para]
+        for row in pipe_lines[1:]:
+            if re.match(r'^\|[\s\-:|]+\|$', row):
+                continue
+            row_unit = f"{title_prefix} {header_row} {row}".strip()
+            units.append(row_unit)
+        return units
+
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n(?=\-\s|\d+\.\s)', para) if len(s.strip()) > 15]
+    return sentences if sentences else [para]
+
+
+def hierarchical_chunk(
+    pages: List[Dict[str, Any]],
+    page_images: Optional[Dict[int, str]] = None,
+    ast: Optional[Any] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Implements Small-to-Big (Parent-Child) chunking synchronized with the Document AST.
+    Child sentences/rows are indexed for precise vector + BM25 matching.
     Parent paragraphs are passed to Gemma 4 for rich, coherent context.
     Also runs automatic document type classification.
     """
     page_images = page_images or {}
-    chunks = []
+    chunks: List[Dict[str, Any]] = []
     chunk_id = 0
 
-    # Auto-classify based on the first 1-2 pages
-    combined_header = " ".join([p["text"][:1000] for p in pages[:2]])
+    combined_header = " ".join([p.get("text", "")[:1000] for p in pages[:2]])
     classification = classify_document(combined_header)
+    default_filename = pages[0].get("filename", "Document") if pages else "Document"
+
+    # When AST is provided, derive chunks directly from AST PARAGRAPH nodes for 100% node ID & path alignment
+    if ast is not None and hasattr(ast, "nodes"):
+        from app.ast_builder import ASTNodeType
+        para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
+        if para_nodes:
+            for p_node in para_nodes:
+                page_num = p_node.page
+                para_text = p_node.text.strip()
+                if not para_text:
+                    continue
+
+                # Determine section title from parent AST node
+                sec_title = "Section"
+                if p_node.parent_id and p_node.parent_id in ast.nodes:
+                    sec_title = ast.nodes[p_node.parent_id].title
+
+                img_url = p_node.image_url or page_images.get(page_num)
+                linked_visuals = []
+                for lid in p_node.linked_node_ids:
+                    v_node = ast.get_node(lid)
+                    if v_node and v_node.type == ASTNodeType.VISUAL:
+                        linked_visuals.append({
+                            "id": v_node.id,
+                            "title": v_node.title,
+                            "image_url": v_node.image_url or page_images.get(v_node.page),
+                            "visual_type": v_node.visual_type,
+                            "bbox": v_node.bbox,
+                            "page": v_node.page,
+                        })
+                        if not img_url and v_node.image_url:
+                            img_url = v_node.image_url
+
+                child_units = _split_into_child_units(para_text)
+                for sent in child_units:
+                    chunk_item: Dict[str, Any] = {
+                        "id": chunk_id,
+                        "filename": default_filename,
+                        "page": page_num,
+                        "parent_text": para_text,
+                        "child_text": sent,
+                        "ast_node_id": p_node.id,
+                        "section_title": sec_title,
+                        "materialized_path": p_node.materialized_path,
+                        "image_url": img_url,
+                        "has_visual": bool(img_url or linked_visuals),
+                    }
+                    if linked_visuals:
+                        chunk_item["linked_visuals"] = linked_visuals
+                    chunks.append(chunk_item)
+                    chunk_id += 1
+            return chunks, classification
 
     for page in pages:
         page_num = page["page"]
         img_url = page_images.get(page_num)
 
-        # Split page into logical paragraphs
-        paragraphs = [p.strip() for p in page["text"].split("\n\n") if len(p.strip()) > 30]
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', page.get("text", "")) if len(p.strip()) > 20]
         if not paragraphs:
-            paragraphs = [page["text"].strip()]
+            paragraphs = [page.get("text", "").strip()] if page.get("text", "").strip() else []
 
-        for p_idx, para in enumerate(paragraphs):
-            # Split paragraph into child sentences
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', para) if len(s.strip()) > 15]
-            if not sentences:
-                sentences = [para]
-
+        for p_idx, para in enumerate(paragraphs, 1):
+            sentences = _split_into_child_units(para)
             for sent in sentences:
                 chunks.append({
                     "id": chunk_id,
-                    "filename": page["filename"],
+                    "filename": page.get("filename", default_filename),
                     "page": page_num,
                     "parent_text": para,
                     "child_text": sent,
+                    "ast_node_id": f"para_{page_num}_{p_idx}",
+                    "section_title": f"Page {page_num}",
+                    "materialized_path": f"root/page_{page_num}/para_{p_idx}",
                     "image_url": img_url,
-                    "has_visual": bool(img_url)
+                    "has_visual": bool(img_url),
                 })
                 chunk_id += 1
 
