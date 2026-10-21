@@ -162,6 +162,7 @@ class ExportReportRequest(BaseModel):
     format: str = "markdown"
 
 @app.post("/ask")
+@app.post("/query")
 async def ask_question(payload: QueryRequest):
     """
     Standard JSON endpoint for AuditGuard Q&A.
@@ -278,14 +279,8 @@ def get_active_document_ast():
         raise HTTPException(status_code=404, detail="No active Document AST available.")
     return DOCUMENT_ASTS[ACTIVE_DOC_ID].to_dict()
 
-@app.get("/api/ast/{doc_id}")
-def get_document_ast_by_id(doc_id: str):
-    """Returns the Document AST for a specific vault document."""
-    if doc_id not in DOCUMENT_ASTS:
-        raise HTTPException(status_code=404, detail=f"Document AST for '{doc_id}' not found.")
-    return DOCUMENT_ASTS[doc_id].to_dict()
-
 @app.get("/api/discrepancies")
+@app.get("/api/ast/discrepancies")
 def get_active_discrepancies():
     """Runs automated Cross-Modal Contradiction Scanner across active AST."""
     if not ACTIVE_DOC_ID or ACTIVE_DOC_ID not in DOCUMENT_ASTS:
@@ -295,6 +290,15 @@ def get_active_discrepancies():
     report = scan_ast_for_discrepancies(ast, use_llm=False)
     report["filename"] = DOCUMENT_VAULT.get(ACTIVE_DOC_ID, {}).get("filename", "Current Document")
     return report
+
+@app.get("/api/ast/{doc_id}")
+def get_document_ast_by_id(doc_id: str):
+    """Returns the Document AST for a specific vault document."""
+    if doc_id not in DOCUMENT_ASTS:
+        raise HTTPException(status_code=404, detail=f"Document AST for '{doc_id}' not found.")
+    return DOCUMENT_ASTS[doc_id].to_dict()
+
+
 
 @app.get("/api/preview/{doc_prefix}/{page_num}")
 async def get_preview_image(doc_prefix: str, page_num: int):
