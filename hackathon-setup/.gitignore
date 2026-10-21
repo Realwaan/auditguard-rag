@@ -1,0 +1,7 @@
+.venv/
+.checks/
+__pycache__/
+model-cache/
+wheels/
+*.zip
+alma.env

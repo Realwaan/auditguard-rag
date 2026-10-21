@@ -83,7 +83,7 @@ def classify_document(sample_text: str) -> Dict[str, Any]:
             "type": "GENERAL_SPECIFICATION",
             "label": "General Enterprise Document",
             "icon": "📄",
-            "confidence": 75.0,
+            "confidence": 0.0,
             "prompt_addon": "You are a professional Enterprise Research Analyst. Provide clear, well-structured, cited answers."
         }
     

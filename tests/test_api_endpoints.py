@@ -70,3 +70,28 @@ def test_ask_and_query_endpoints_benchmark_fields():
     assert data["total_ms"] >= data["retrieval_ms"]
     assert "status" in data
     assert "evaluation" in data
+
+def test_export_report_markdown_and_json():
+    # Test Markdown export
+    md_res = client.post("/export-report", json={
+        "query": "What is the uptime SLA?",
+        "answer": "Guaranteed 99.9% uptime [1].",
+        "sources": [{"citation_id": 1, "filename": "sla.txt", "page": 1, "parent_text": "99.9% uptime"}],
+        "classification": {"label": "Legal SLA"},
+        "evaluation": {"badge": "GROUNDED", "confidence": 98.5},
+        "baseline": "Ungrounded output",
+        "format": "markdown"
+    })
+    assert md_res.status_code == 200
+    assert "attachment; filename=" in md_res.headers.get("Content-Disposition", "")
+    assert "# 🛡️ AuditGuard" in md_res.text
+
+    # Test JSON export
+    json_res = client.post("/export-report", json={
+        "query": "What is the uptime SLA?",
+        "answer": "Guaranteed 99.9% uptime [1].",
+        "format": "json"
+    })
+    assert json_res.status_code == 200
+    assert "attachment; filename=" in json_res.headers.get("Content-Disposition", "")
+    assert json_res.json()["title"] == "AuditGuard Grounded Audit Trail Report"

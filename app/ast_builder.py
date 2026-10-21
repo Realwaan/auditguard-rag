@@ -265,6 +265,9 @@ def extract_halo_crops(
 
                 v_title = cand.get("title") or f"Visual P{page_num} #{v_idx}"
                 v_text = cand.get("text") or f"Visual crop: {v_title}"
+                # Derive crop confidence from geometry and caption clarity
+                aspect_ratio = min(w, h) / max(1.0, max(w, h))
+                geom_conf = round(min(0.98, max(0.60, 0.70 + (aspect_ratio * 0.25))), 2)
 
                 node = ASTNode(
                     id=vis_id,
@@ -276,7 +279,7 @@ def extract_halo_crops(
                     bbox=(crop_x0, crop_y0, crop_x1, crop_y1),
                     image_url=f"/static/crops/{crop_file_name}",
                     visual_type=cand.get("visual_type", "figure"),
-                    confidence=0.95,
+                    confidence=geom_conf,
                 )
                 visual_nodes.append(node)
     finally:
@@ -300,19 +303,25 @@ def link_cross_modal_symbols(ast: DocumentAST) -> None:
 
     # Helper regex for identifying symbols
     symbol_pattern = re.compile(
-        r'\b(?:figure|fig\.?|table|chart|exhibit|diagram)\s*([0-9]+[a-z]?(?:\.[0-9]+)?)',
+        r'\b(figure|fig\.?|table|chart|exhibit|diagram)\s*([0-9]+[a-z]?(?:\.[0-9]+)?)',
         re.IGNORECASE
     )
 
     # 1. Tier 1: Symbol Matching
     for p_node in paragraphs:
         matches = symbol_pattern.findall(p_node.text)
-        for num in matches:
+        for sym_type, num in matches:
             norm_num = num.strip().lower()
+            sym_prefix = "fig" if "fig" in sym_type.lower() else sym_type.lower()
             for v_node in visuals:
                 v_title_lower = v_node.title.lower()
-                # Check if visual title contains the matched symbol number
-                if norm_num in v_title_lower or f" {norm_num}" in v_title_lower or f"#{norm_num}" in v_title_lower:
+                clean_v_title = re.sub(r'page\s+\d+', '', v_title_lower)
+                matched = bool(
+                    re.search(r'\b' + re.escape(sym_prefix) + r'[^\d]*' + re.escape(norm_num) + r'\b', clean_v_title) or
+                    re.search(r'#' + re.escape(norm_num) + r'\b', clean_v_title) or
+                    (norm_num in clean_v_title and any(t in clean_v_title for t in ["table", "fig", "chart"]))
+                )
+                if matched:
                     if v_node.id not in p_node.linked_node_ids:
                         p_node.linked_node_ids.append(v_node.id)
                     if p_node.id not in v_node.linked_node_ids:

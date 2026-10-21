@@ -138,6 +138,85 @@ def extract_pages_from_text(raw_text: str, filename: str) -> List[Dict[str, Any]
         })
     return pages
 
+
+def extract_pages_from_docx(docx_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
+    """Extract sections, headings, paragraphs, and tables from Word documents (.docx)."""
+    import docx
+    doc = docx.Document(io.BytesIO(docx_bytes))
+    sections = []
+    current_section = []
+    
+    for p in doc.paragraphs:
+        t = p.text.strip()
+        if not t:
+            continue
+        if p.style.name.startswith("Heading") or re.match(r"^\d+\.", t):
+            if current_section:
+                sections.append("\n\n".join(current_section))
+                current_section = []
+            current_section.append(f"## {t}")
+        else:
+            current_section.append(t)
+            
+    for table in doc.tables:
+        rows_txt = []
+        for row in table.rows:
+            cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+            rows_txt.append(" | ".join(cells))
+        if rows_txt:
+            table_md = "\n".join(rows_txt)
+            current_section.append(f"**Table Data:**\n```\n{table_md}\n```")
+            
+    if current_section:
+        sections.append("\n\n".join(current_section))
+        
+    if not sections:
+        sections = ["Empty Word document."]
+        
+    pages = []
+    for idx, sec in enumerate(sections, 1):
+        pages.append({
+            "filename": filename,
+            "page": idx,
+            "text": clean_text_to_markdown(sec)
+        })
+    return pages
+
+def extract_pages_from_pptx(pptx_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
+    """Extract slide-by-slide text, titles, notes, and tables from PowerPoint (.pptx)."""
+    from pptx import Presentation
+    prs = Presentation(io.BytesIO(pptx_bytes))
+    pages = []
+    for idx, slide in enumerate(prs.slides, 1):
+        slide_parts = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for p in shape.text_frame.paragraphs:
+                    t = p.text.strip()
+                    if t:
+                        slide_parts.append(t)
+            elif shape.has_table:
+                table_rows = []
+                for row in shape.table.rows:
+                    cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                    table_rows.append(" | ".join(cells))
+                if table_rows:
+                    slide_parts.append("Table:\n" + "\n".join(table_rows))
+                    
+        slide_content = "\n\n".join(slide_parts).strip()
+        if not slide_content:
+            slide_content = f"Slide {idx} (Visual Graphic / Title Slide)"
+            
+        pages.append({
+            "filename": filename,
+            "page": idx,
+            "text": clean_text_to_markdown(f"## Slide {idx}\n\n" + slide_content)
+        })
+        
+    if not pages:
+        pages.append({"filename": filename, "page": 1, "text": "Empty presentation."})
+    return pages
+
 def hierarchical_chunk(pages: List[Dict[str, Any]], page_images: Dict[int, str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Implements Small-to-Big (Parent-Child) chunking.

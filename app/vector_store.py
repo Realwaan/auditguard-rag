@@ -33,11 +33,11 @@ class LanceVectorStore:
     def index_ast(
         self,
         ast: DocumentAST,
-        embeddings_matrix: np.ndarray,
+        embeddings_matrix: Optional[np.ndarray] = None,
     ) -> str:
         """
         Indexes all leaf nodes (paragraphs) and visual nodes into a LanceDB table.
-        embeddings_matrix shape must match the number of indexed nodes.
+        Ensures 1:1 vector alignment by computing leaf embeddings directly if shape diverges.
         """
         leaves = [
             n for n in ast.nodes.values()
@@ -47,9 +47,18 @@ class LanceVectorStore:
             return ""
 
         table_name = self._get_table_name(ast.doc_id)
+        
+        # Verify 1:1 vector alignment against actual AST leaves
+        if embeddings_matrix is None or len(embeddings_matrix) != len(leaves):
+            from app.embeddings import embed_texts
+            leaf_texts = [n.text if n.text.strip() else n.title for n in leaves]
+            actual_embeddings = embed_texts(leaf_texts)
+        else:
+            actual_embeddings = embeddings_matrix
+
         records = []
         for idx, node in enumerate(leaves):
-            vec = embeddings_matrix[idx].tolist() if idx < len(embeddings_matrix) else [0.0] * 384
+            vec = actual_embeddings[idx].tolist() if idx < len(actual_embeddings) else [0.0] * 384
             records.append({
                 "id": str(node.id),
                 "vector": vec,

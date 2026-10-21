@@ -1,0 +1,18 @@
+# Setup dependencies only. The adjacent lock file captures this PC's versions.
+fastapi
+uvicorn
+python-multipart
+pypdf
+pypdfium2
+Pillow
+fastembed
+numpy
+rank-bm25
+openai
+python-dotenv
+pytest
+lancedb
+pyarrow
+python-docx
+python-pptx
+httpx

@@ -1,3 +1,4 @@
+import re
 import difflib
 from typing import List, Dict, Any, Optional
 from app.retriever import HybridRetriever
@@ -120,13 +121,27 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
 
     for check in DEFAULT_COMPLIANCE_CHECKS:
         retrieved = retriever.retrieve(check["query"], top_k=2)
-        eval_res = evaluate_relevance(retrieved)
+        eval_res = evaluate_relevance(retrieved, query=check["query"])
         remediation = COMPLIANCE_REMEDIATION_PLAYBOOK.get(check["id"], {})
 
-        if eval_res["status"] == "SYNTHESIZE":
+        # Negation / Non-Compliance clause check
+        is_negated = False
+        negation_reason = ""
+        if retrieved:
+            first_text = retrieved[0].get("parent_text", retrieved[0].get("child_text", "")).lower()
+            if check["id"] == "SLA-01" and re.search(r'\b(0%|zero\s*percent|no\s+uptime|does\s+not\s+guarantee|no\s+guarantee)\b', first_text):
+                is_negated = True
+                negation_reason = "Document explicitly disclaims or negates uptime availability."
+            elif check["id"] == "SEC-03" and re.search(r'\b(ban\s+mfa|prohibit\s+mfa|no\s+mfa|without\s+mfa|prohibits\s+mfa)\b', first_text):
+                is_negated = True
+                negation_reason = "Document explicitly bans or excludes mandatory MFA controls."
+            elif check["id"] == "PEN-02" and re.search(r'\b(no\s+penalty|no\s+credit|no\s+liability|penalties\s+waived)\b', first_text):
+                is_negated = True
+                negation_reason = "Document waives or disclaims contractual breach credits."
+
+        if eval_res["status"] == "SYNTHESIZE" and not is_negated:
             best_chunk = retrieved[0]
             excerpt = best_chunk.get("parent_text", best_chunk.get("child_text", ""))
-            # Truncate clean excerpt for summary card
             clean_excerpt = excerpt.split("\n")[0].strip()
             if len(clean_excerpt) > 110:
                 clean_excerpt = clean_excerpt[:107] + "..."
@@ -141,7 +156,9 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "status": "PASS",
                 "badge": "✅ PASS",
                 "confidence": eval_res["confidence"],
+                "excerpt": clean_excerpt,
                 "clause_excerpt": clean_excerpt,
+                "evidence": clean_excerpt,
                 "full_clause": excerpt,
                 "page": best_chunk.get("page", 1),
                 "image_url": best_chunk.get("image_url", ""),
@@ -149,6 +166,7 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence.",
                 "remediation_clause": "Compliant with enterprise standard. No remediation required.",
                 "redline_diff": None,
+                "diff": None,
                 "action_plan": "Verified active in document.",
                 "rationale": remediation.get("rationale", "Meets compliance requirements.")
             })
@@ -158,6 +176,7 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
             action = remediation.get("action_required", "Remediation insertion required.")
             rationale = remediation.get("rationale", "Mandatory compliance clause.")
             redline = generate_redline_diff("", std_clause, check["id"])
+            finding_text = f"NON-COMPLIANCE DETECTED: {negation_reason}" if is_negated else f"HIGH AUDIT RISK: {action}"
 
             results.append({
                 "id": check["id"],
@@ -168,14 +187,17 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "status": "GAP",
                 "badge": "❌ GAP DETECTED",
                 "confidence": eval_res["confidence"],
-                "clause_excerpt": "Clause not present in agreement or below confidence threshold.",
+                "excerpt": "Clause missing from active document or fails compliance verification.",
+                "clause_excerpt": "Clause missing from active document or fails compliance verification.",
+                "evidence": "Clause missing from active document or fails compliance verification.",
                 "full_clause": "",
                 "page": None,
                 "image_url": "",
                 "citation_id": None,
-                "finding": f"HIGH AUDIT RISK: {action}",
+                "finding": finding_text,
                 "remediation_clause": std_clause,
                 "redline_diff": redline,
+                "diff": redline,
                 "action_plan": action,
                 "rationale": rationale
             })
@@ -197,11 +219,13 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
         "overall_score": score_pct,
         "total_checks": total_checks,
         "total_controls": total_checks,
+        "controls_checked": total_checks,
         "passed_count": passed_count,
         "gaps_count": gaps_count,
         "verdict": verdict,
         "verdict_color": verdict_color,
         "checklist": results,
+        "controls": results,
         "remediation_count": gaps_count,
         "remediation_playbook_available": True
     }

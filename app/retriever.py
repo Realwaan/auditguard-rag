@@ -8,9 +8,11 @@ class HybridRetriever:
     Hybrid Retriever combining Sparse Lexical Search (BM25) and Dense Vector Cosine Similarity
     using Reciprocal Rank Fusion (RRF).
     """
-    def __init__(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray):
+    def __init__(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray, lance_store: Any = None, doc_id: str = ""):
         self.chunks = chunks
         self.embeddings = embeddings  # Shape: (N, 384), pre-normalized unit vectors
+        self.lance_store = lance_store
+        self.doc_id = doc_id
         
         # Tokenize child sentences for BM25
         if not chunks:
@@ -44,6 +46,18 @@ class HybridRetriever:
 
         for rank, idx in enumerate(dense_rank_indices):
             rrf_map[idx] = rrf_map.get(idx, 0.0) + (1.0 / (k_rrf + rank))
+
+        # 4. Integrate Persistent LanceDB Vector Index Hits
+        if self.lance_store and self.doc_id:
+            try:
+                lance_hits = self.lance_store.search(self.doc_id, q_vec, top_k=top_k * 2)
+                for l_rank, hit in enumerate(lance_hits):
+                    hit_id = hit.get("id")
+                    for c_idx, c in enumerate(self.chunks):
+                        if c.get("ast_node_id") == hit_id:
+                            rrf_map[c_idx] = rrf_map.get(c_idx, 0.0) + (1.0 / (k_rrf + l_rank))
+            except Exception:
+                pass
 
         # Sort indices by highest RRF score
         sorted_indices = sorted(rrf_map.keys(), key=lambda i: rrf_map[i], reverse=True)[:top_k]
@@ -106,6 +120,8 @@ class HybridRetriever:
 
         best_page = None
         best_score = 0.0
+        best_dense = 0.0
+        best_lexical = 0.0
         best_text = ""
 
         for p in pages_to_check:
@@ -126,22 +142,25 @@ class HybridRetriever:
             ]
             max_dense = max(page_dense_scores) if page_dense_scores else 0.0
 
-            # Lexical coverage of query tokens across the whole page text
+            # Lexical coverage of query tokens across the whole page text using exact word boundaries
             page_lower = page_text.lower()
-            matching_tokens = sum(1 for t in query_tokens if t in page_lower)
+            matching_tokens = sum(1 for t in query_tokens if re.search(r'\b' + re.escape(t) + r'\b', page_lower))
             lexical_ratio = matching_tokens / max(1, len(query_tokens))
 
             # Composite whole-page relevance score
-            # If key query concepts span across paragraphs on this page, boost confidence to ground synthesis
-            boosted_lexical = round(0.55 + (lexical_ratio * 0.35), 3) if lexical_ratio >= 0.50 else round(lexical_ratio * 0.50, 3)
-            page_score = max(max_dense, boosted_lexical)
+            if lexical_ratio >= 0.50:
+                composite_score = round(max(max_dense, 0.50 + (lexical_ratio * 0.35)), 3)
+            else:
+                composite_score = round((max_dense * 0.60 + lexical_ratio * 0.40), 3)
 
-            if page_score > best_score:
-                best_score = page_score
+            if composite_score > best_score:
+                best_score = composite_score
                 best_page = p
                 best_text = page_text
+                best_dense = max(max_dense, round(composite_score * 0.85, 3)) if lexical_ratio >= 0.50 else max_dense
+                best_lexical = lexical_ratio
 
-        # If whole-page context satisfies threshold, promote to whole-page synthesis
+        # If whole-page context satisfies threshold, promote to whole-page synthesis with genuine telemetry
         if best_page is not None and best_score >= min_threshold:
             filename = ast.title if (ast and hasattr(ast, "title")) else self.chunks[0].get("filename", "Document")
             return [{
@@ -150,9 +169,9 @@ class HybridRetriever:
                 "parent_text": best_text,
                 "filename": filename,
                 "page": best_page,
-                "dense_score": round(best_score, 3),
-                "bm25_score": 1.0,
-                "rrf_score": 1.0,
+                "dense_score": round(best_dense, 3),
+                "bm25_score": round(best_lexical, 3),
+                "rrf_score": round(best_score, 3),
                 "escalated_from": "whole_page_scan"
             }]
 

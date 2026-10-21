@@ -4,17 +4,18 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 
 from app.config import (
     DOCS_DIR, INDEX_DIR, PREVIEWS_DIR, CROPS_DIR, TOP_K,
-    GEMMA_MODEL, USE_GOOGLE_GENAI
+    USE_GOOGLE_GENAI, GEMINI_API_KEY, get_gemma_model, set_gemma_model
 )
 from app.ingest import (
     extract_pages_from_pdf, extract_pages_from_text,
+    extract_pages_from_docx, extract_pages_from_pptx,
     render_page_previews, hierarchical_chunk, get_or_render_page_image
 )
 from app.ast_builder import build_document_ast, DocumentAST, ASTNode, ASTNodeType
@@ -57,16 +58,30 @@ class QueryRequest(BaseModel):
 
 @app.get("/health")
 def health_check():
+    lancedb_ready = False
+    try:
+        if LANCE_STORE and hasattr(LANCE_STORE, "db"):
+            if hasattr(LANCE_STORE.db, "list_tables"):
+                LANCE_STORE.db.list_tables()
+            else:
+                LANCE_STORE.db.table_names()
+            lancedb_ready = True
+    except Exception as e:
+        print(f"[LanceDB Health Ping Error]: {e}")
+        lancedb_ready = False
+
     return {
         "status": "healthy",
+        "service": "AuditGuard RAG Enterprise Grounding Engine",
         "doc_loaded": len(ACTIVE_CHUNKS) > 0,
         "classification": ACTIVE_CLASSIFICATION.get("label"),
         "chunk_count": len(ACTIVE_CHUNKS),
         "ast_loaded": ACTIVE_DOC_ID in DOCUMENT_ASTS,
-        "lancedb_ready": True,
-        "model": GEMMA_MODEL,
+        "lancedb_ready": lancedb_ready,
+        "model": get_gemma_model(),
         "engine": "Google GenAI (Native)" if USE_GOOGLE_GENAI else "OpenAI-Compatible (ALMA)",
-        "use_google_genai": USE_GOOGLE_GENAI
+        "use_google_genai": USE_GOOGLE_GENAI,
+        "gemini_api_key_active": bool(GEMINI_API_KEY)
     }
 
 @app.post("/upload")
@@ -83,15 +98,28 @@ async def upload_document(file: UploadFile = File(...)):
     filename = file.filename or "uploaded_doc.pdf"
     doc_id = Path(filename).stem.replace(" ", "_")
 
-    # 1. Page extraction & visual preview rendering
-    is_pdf = filename.lower().endswith(".pdf")
+    # 1. Multi-Format Document Ingestion Engine (PDF, DOCX, PPTX, TXT, MD)
+    ext = Path(filename).suffix.lower()
+    is_pdf = (ext == ".pdf")
+    page_images = {}
+
     if is_pdf:
         pages = extract_pages_from_pdf(contents, filename)
         page_images = render_page_previews(contents, doc_id)
-    else:
+    elif ext in (".docx", ".doc"):
+        pages = extract_pages_from_docx(contents, filename)
+    elif ext in (".pptx", ".ppt"):
+        pages = extract_pages_from_pptx(contents, filename)
+    elif ext in (".txt", ".md", ".csv", ".json", ".log"):
         text_str = contents.decode("utf-8", errors="replace")
         pages = extract_pages_from_text(text_str, filename)
-        page_images = {}
+    else:
+        # Fallback raw text attempt
+        try:
+            text_str = contents.decode("utf-8")
+        except UnicodeDecodeError:
+            text_str = contents.decode("latin-1", errors="replace")
+        pages = extract_pages_from_text(text_str, filename)
 
     if not pages:
         raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
@@ -109,24 +137,39 @@ async def upload_document(file: UploadFile = File(...)):
     chunks, classification = hierarchical_chunk(pages, page_images)
     ACTIVE_CLASSIFICATION = classification
 
-    # Attach AST node metadata to chunks
-    for idx, c in enumerate(chunks):
-        c["ast_node_id"] = f"{doc_id}_para_{idx+1}"
-        c["materialized_path"] = f"root/sec/para_{idx+1}"
+    # Attach accurate AST node metadata to chunks by matching parent paragraph text
+    para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
+    for c in chunks:
+        p_text = c.get("parent_text", "").strip()
+        matched = next((n for n in para_nodes if n.page == c.get("page") and (p_text[:50] in n.text or n.text[:50] in p_text)), None)
+        if not matched and para_nodes:
+            matched = next((n for n in para_nodes if p_text[:50] in n.text or n.text[:50] in p_text), para_nodes[0])
+        if matched:
+            c["ast_node_id"] = matched.id
+            c["materialized_path"] = matched.materialized_path
+            c["linked_node_ids"] = matched.linked_node_ids
+            if matched.linked_node_ids and not c.get("image_url"):
+                v_node = ast.get_node(matched.linked_node_ids[0])
+                if v_node and v_node.image_url:
+                    c["image_url"] = v_node.image_url
+                    c["has_visual"] = True
+        else:
+            c["ast_node_id"] = f"{doc_id}_para_1"
+            c["materialized_path"] = f"root/sec/para_1"
 
     # 4. Dense Vector Embeddings (Child Sentences)
     child_texts = [c["child_text"] for c in chunks]
     embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
 
-    # 5. Index into LanceDB (In-Process Columnar Vector Engine)
+    # 5. Index AST Leaves directly into LanceDB (In-Process Columnar Vector Engine)
     try:
-        LANCE_STORE.index_ast(ast, embeddings_matrix)
+        await asyncio.to_thread(LANCE_STORE.index_ast, ast)
     except Exception as e:
         print(f"LanceDB indexing warning: {e}")
 
-    # 6. Initialize In-Memory Hybrid RRF Retriever for microsecond queries
+    # 6. Initialize Hybrid RRF Retriever backed by LanceDB vector engine
     ACTIVE_CHUNKS = chunks
-    ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix)
+    ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix, lance_store=LANCE_STORE, doc_id=doc_id)
     ACTIVE_DOC_ID = doc_id
 
     indexing_ms = round((time.perf_counter() - t_start) * 1000, 2)
@@ -166,6 +209,84 @@ class ExportReportRequest(BaseModel):
     evaluation: dict = {}
     baseline: str = ""
     format: str = "markdown"
+
+@app.post("/export-report")
+async def export_audit_report(payload: ExportReportRequest):
+    """
+    Exports formal compliance audit report or audit trail in Markdown or JSON format.
+    Includes exact timestamps, citations, grounding confidence score, and baseline comparison.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    date_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if payload.format == "json":
+        data = {
+            "title": "AuditGuard Grounded Audit Trail Report",
+            "exported_at": timestamp,
+            "query": payload.query,
+            "grounded_answer": payload.answer,
+            "grounding_evaluation": payload.evaluation,
+            "classification": payload.classification,
+            "verified_sources": payload.sources,
+            "ungrounded_baseline": payload.baseline
+        }
+        json_bytes = json.dumps(data, indent=2).encode("utf-8")
+        filename = f"audit_trail_{date_slug}.json"
+        return Response(
+            content=json_bytes,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
+
+    # Markdown report formatting
+    lines = [
+        "# 🛡️ AuditGuard Formal Document Intelligence Report",
+        f"**Generated:** {timestamp}",
+        f"**Classification:** {payload.classification.get('label', 'Enterprise Document')}",
+        f"**Grounding Status:** {payload.evaluation.get('badge', 'GROUNDED')}",
+        f"**Grounding Score:** {payload.evaluation.get('confidence', 0)}%",
+        "",
+        "---",
+        "",
+        "## 1. Audit Query",
+        f"> {payload.query}",
+        "",
+        "## 2. Grounded Synthesis & Verdict",
+        payload.answer,
+        "",
+        "---",
+        "",
+        "## 3. Verified Evidentiary Sources"
+    ]
+
+    if not payload.sources:
+        lines.append("*No evidentiary sources retrieved.*")
+    else:
+        for idx, src in enumerate(payload.sources, 1):
+            cid = src.get("citation_id", idx)
+            doc = src.get("filename", "Active Document")
+            page = src.get("page", 1)
+            dense = src.get("dense_score", 0.0)
+            text = src.get("parent_text", src.get("child_text", "")).strip()
+            lines.append(f"### [{cid}] {doc} (Page {page}) — Dense Match: {dense}")
+            lines.append(f"```\n{text}\n```\n")
+
+    if payload.baseline:
+        lines.extend([
+            "---",
+            "",
+            "## 4. Hallucination Radar (Baseline Comparison)",
+            "**Ungrounded LLM Output (Zero-Context Baseline):**",
+            f"> {payload.baseline}"
+        ])
+
+    md_content = "\n".join(lines).encode("utf-8")
+    filename = f"audit_report_{date_slug}.md"
+    return Response(
+        content=md_content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 @app.post("/ask")
 @app.post("/query")
@@ -221,18 +342,18 @@ async def ask_question(payload: QueryRequest):
     query_words = len(query.split())
     estimated_tokens = int((context_words + query_words) * 1.33 + 200)
 
-    # 4. CRAG Relevance Gatekeeper (Tier 1: Chunk-Level Evaluation)
-    eval_result = evaluate_relevance(retrieved)
+    # 4. CRAG Relevance Gatekeeper (Tier 1: Chunk-Level Evaluation with Query Grounding)
+    eval_result = evaluate_relevance(retrieved, query=query)
 
     # Tier 2 AST Whole-Page Escalation:
-    # If chunk-level relevance is ambiguous or falls below threshold (< 0.50),
+    # If chunk-level relevance is ambiguous or falls below threshold,
     # climb up the Document AST to scan the entire candidate page(s).
     if eval_result["status"] == "REFUSE" and ACTIVE_RETRIEVER:
         candidate_pages = [c.get("page") for c in retrieved if c.get("page")]
         ast = DOCUMENT_ASTS.get(ACTIVE_DOC_ID)
         escalated_chunks = ACTIVE_RETRIEVER.escalate_page_scan(query, candidate_pages, ast=ast)
         if escalated_chunks:
-            escalated_eval = evaluate_relevance(escalated_chunks)
+            escalated_eval = evaluate_relevance(escalated_chunks, query=query)
             if escalated_eval["status"] != "REFUSE":
                 retrieved = escalated_chunks
                 eval_result = escalated_eval
@@ -250,7 +371,10 @@ async def ask_question(payload: QueryRequest):
             "classification": ACTIVE_CLASSIFICATION,
             "retrieval_ms": retrieval_ms,
             "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
-            "estimated_tokens": estimated_tokens
+            "estimated_tokens": 0,
+            "tokens": 0,
+            "is_fallback": False,
+            "model": get_gemma_model()
         }
 
     # 6 & 7. Synthesize Grounded Answer & Hallucination Baseline in PARALLEL (50% Latency Reduction)
@@ -264,11 +388,29 @@ async def ask_question(payload: QueryRequest):
             return await asyncio.to_thread(call_plain_gemma, query)
         return ""
 
-    grounded_answer, plain_baseline = await asyncio.gather(_fetch_grounded(), _fetch_baseline())
+    grounded_res, plain_baseline = await asyncio.gather(_fetch_grounded(), _fetch_baseline())
+
+    if isinstance(grounded_res, dict):
+        grounded_answer = grounded_res.get("answer", "")
+        actual_tokens = grounded_res.get("tokens", 0)
+        is_fallback = grounded_res.get("is_fallback", False)
+        model_used = grounded_res.get("model", get_gemma_model())
+    else:
+        grounded_answer = str(grounded_res)
+        actual_tokens = 0
+        is_fallback = False
+        model_used = get_gemma_model()
+
+    reported_tokens = actual_tokens if actual_tokens > 0 else (0 if is_fallback else estimated_tokens)
+    status = "SUCCESS"
+    if "I cannot verify this information" in grounded_answer:
+        status = "REFUSE"
+        eval_result["status"] = "REFUSE"
+        eval_result["badge"] = "⚠️ OUT-OF-BOUNDS (Refused)"
 
     return {
         "query": query,
-        "status": "SUCCESS",
+        "status": status,
         "evaluation": eval_result,
         "answer": grounded_answer,
         "sources": retrieved,
@@ -276,7 +418,10 @@ async def ask_question(payload: QueryRequest):
         "classification": ACTIVE_CLASSIFICATION,
         "retrieval_ms": retrieval_ms,
         "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
-        "estimated_tokens": estimated_tokens
+        "estimated_tokens": reported_tokens,
+        "tokens": reported_tokens,
+        "is_fallback": is_fallback,
+        "model": model_used
     }
 
 @app.get("/ask-stream")
@@ -287,7 +432,7 @@ async def ask_stream(query: str):
         return StreamingResponse(iter(["Error: No document loaded."]), media_type="text/plain")
 
     retrieved = ACTIVE_RETRIEVER.retrieve(query, top_k=TOP_K)
-    eval_result = evaluate_relevance(retrieved)
+    eval_result = evaluate_relevance(retrieved, query=query)
 
     if eval_result["status"] == "REFUSE":
         return StreamingResponse(
@@ -316,7 +461,8 @@ def get_active_discrepancies():
         raise HTTPException(status_code=400, detail="No document loaded. Please upload or load a document first.")
     
     ast = DOCUMENT_ASTS[ACTIVE_DOC_ID]
-    report = scan_ast_for_discrepancies(ast, use_llm=False)
+    use_llm_verification = USE_GOOGLE_GENAI and bool(GEMINI_API_KEY)
+    report = scan_ast_for_discrepancies(ast, use_llm=use_llm_verification)
     report["filename"] = DOCUMENT_VAULT.get(ACTIVE_DOC_ID, {}).get("filename", "Current Document")
     return report
 
@@ -411,17 +557,32 @@ Either party may terminate this agreement without cause by providing at least 30
         p2[0].metadata["link_tier"] = 1
         p2[0].metadata["link_weight"] = 1.0
 
+    # Attach AST node metadata to chunks
+    para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
+    for c in chunks:
+        p_text = c.get("parent_text", "").strip()
+        matched = next((n for n in para_nodes if (p_text[:50] in n.text or n.text[:50] in p_text)), None)
+        if matched:
+            c["ast_node_id"] = matched.id
+            c["materialized_path"] = matched.materialized_path
+            c["linked_node_ids"] = matched.linked_node_ids
+            if matched.linked_node_ids and not c.get("image_url"):
+                v_node = ast.get_node(matched.linked_node_ids[0])
+                if v_node and v_node.image_url:
+                    c["image_url"] = v_node.image_url
+                    c["has_visual"] = True
+
     DOCUMENT_ASTS[sample_doc_id] = ast
     ACTIVE_CLASSIFICATION = classification
     ACTIVE_CHUNKS = chunks
 
     child_texts = [c["child_text"] for c in chunks]
     embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
-    ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix)
+    ACTIVE_RETRIEVER = HybridRetriever(chunks, embeddings_matrix, lance_store=LANCE_STORE, doc_id=sample_doc_id)
     ACTIVE_DOC_ID = sample_doc_id
 
     try:
-        LANCE_STORE.index_ast(ast, embeddings_matrix)
+        await asyncio.to_thread(LANCE_STORE.index_ast, ast)
     except Exception as e:
         print(f"LanceDB index error: {e}")
 
@@ -453,6 +614,14 @@ Either party may terminate this agreement without cause by providing at least 30
         "indexing_duration_ms": indexing_ms,
         "classification": ACTIVE_CLASSIFICATION
     }
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        await load_sample_document()
+        print("[AuditGuard RAG] Default Enterprise SLA loaded successfully.")
+    except Exception as e:
+        print(f"[AuditGuard RAG Startup Error]: {e}")
 
 @app.get("/vault")
 def get_vault():
@@ -507,15 +676,13 @@ def get_compliance_audit():
 @app.post("/api/model/toggle")
 def toggle_model():
     """Toggle between high-speed Gemma 4 MoE (26b-a4b-it ~3s) and dense Gemma 4 (31b-it ~28s)."""
-    import app.config as cfg
-    if cfg.GEMMA_MODEL == "gemma-4-26b-a4b-it":
-        cfg.GEMMA_MODEL = "gemma-4-31b-it"
-    else:
-        cfg.GEMMA_MODEL = "gemma-4-26b-a4b-it"
+    current = get_gemma_model()
+    new_model = "gemma-4-31b-it" if current == "gemma-4-26b-a4b-it" else "gemma-4-26b-a4b-it"
+    set_gemma_model(new_model)
     return {
         "ok": True,
-        "model": cfg.GEMMA_MODEL,
-        "label": "Gemma 4 MoE (~3s)" if cfg.GEMMA_MODEL == "gemma-4-26b-a4b-it" else "Gemma 4 Dense 31B (~28s)"
+        "model": new_model,
+        "label": "Gemma 4 MoE (~3s)" if new_model == "gemma-4-26b-a4b-it" else "Gemma 4 Dense 31B (~28s)"
     }
 
 @app.get("/", response_class=HTMLResponse)

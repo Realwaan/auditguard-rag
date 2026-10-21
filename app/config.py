@@ -14,7 +14,20 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "local-or-alma-key")
 # Google GenAI Native Gemma 4 (31B)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 USE_GOOGLE_GENAI = os.getenv("USE_GOOGLE_GENAI", "true").lower() in ("true", "1", "yes")
-GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+_CURRENT_GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+GEMMA_MODEL = _CURRENT_GEMMA_MODEL
+
+def get_gemma_model() -> str:
+    """Returns the actively selected Gemma model name."""
+    global _CURRENT_GEMMA_MODEL
+    return _CURRENT_GEMMA_MODEL
+
+def set_gemma_model(model_name: str) -> str:
+    """Dynamically updates the active Gemma model name across all modules."""
+    global _CURRENT_GEMMA_MODEL, GEMMA_MODEL
+    _CURRENT_GEMMA_MODEL = model_name
+    GEMMA_MODEL = model_name
+    return _CURRENT_GEMMA_MODEL
 
 # Storage & Paths
 DATA_DIR = BASE_DIR / "data"

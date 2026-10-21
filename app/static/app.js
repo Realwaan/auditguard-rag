@@ -498,26 +498,27 @@ function loadASTGraph() {
         })
         .then(data => {
             document.getElementById("ast-total-nodes").innerText = data.total_nodes || 0;
-            document.getElementById("ast-total-links").innerText = data.cross_modal_links || 0;
+            document.getElementById("ast-total-links").innerText = Array.isArray(data.cross_modal_links) ? data.cross_modal_links.length : (data.cross_modal_links || 0);
             renderASTTree(data);
             if (window.lucide) lucide.createIcons();
         })
         .catch(err => {
+            console.error("AST load error:", err);
             container.innerHTML = `<p class="text-amber-400 text-center py-4">⚠️ No active document loaded. Please click <strong>1-Click Demo</strong> first.</p>`;
         });
 }
 
 function renderASTTree(data) {
     const container = document.getElementById("ast-tree-container");
-    const nodes = data.nodes || [];
+    const nodes = Array.isArray(data.nodes) ? data.nodes : Object.values(data.nodes || {});
     if (nodes.length === 0) {
         container.innerHTML = `<p class="text-slate-500 italic text-center py-4">Tree is empty. Upload a document to build AST hierarchy.</p>`;
         return;
     }
 
-    const sections = nodes.filter(n => n.type === 'SECTION');
-    const paragraphs = nodes.filter(n => n.type === 'PARAGRAPH');
-    const visuals = nodes.filter(n => n.type === 'VISUAL');
+    const sections = nodes.filter(n => (n.type || '').toUpperCase() === 'SECTION');
+    const paragraphs = nodes.filter(n => (n.type || '').toUpperCase() === 'PARAGRAPH');
+    const visuals = nodes.filter(n => (n.type || '').toUpperCase() === 'VISUAL');
 
     let html = `<div class="space-y-3 font-sans">
       <!-- Root Node -->
@@ -756,7 +757,7 @@ function loadComplianceAudit() {
                   </span>
                 </div>
                 <div class="p-2 rounded bg-slate-900 border border-slate-800 text-slate-300 italic text-[11px]">
-                  "${item.excerpt || 'Control missing from active document.'}"
+                  "${item.excerpt || item.clause_excerpt || 'Control missing from active document.'}"
                 </div>
                 ${remediationHtml}`;
                 container.appendChild(row);
