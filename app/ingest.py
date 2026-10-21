@@ -110,18 +110,79 @@ def clean_text_to_markdown(raw_text: str) -> str:
     return "\n".join(cleaned)
 
 def extract_pages_from_pdf(pdf_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
-    """Extract page-level text and metadata from raw PDF bytes, normalized to structured Markdown."""
-    reader = PdfReader(io.BytesIO(pdf_bytes))
+    """
+    Extract page-level text and metadata from raw PDF bytes, normalized to structured Markdown.
+    Includes automated fallback to pypdfium2 textpages for CID/malformed streams,
+    and supports scanned/image-only PDFs so visual AST leaves can still be extracted.
+    """
     pages = []
-    for idx, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        if text.strip():
-            md_text = clean_text_to_markdown(text)
+    total_pdf_pages = 0
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pdf_pages = len(reader.pages)
+        for idx, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                md_text = clean_text_to_markdown(text)
+                pages.append({
+                    "filename": filename,
+                    "page": idx + 1,
+                    "text": md_text
+                })
+    except Exception as e:
+        print(f"pypdf extraction notice: {e}")
+
+    # Fallback to pypdfium2 if pypdf missed pages or failed
+    if not pages or len(pages) < total_pdf_pages:
+        try:
+            pdf = pdfium.PdfDocument(pdf_bytes)
+            try:
+                pdfium_total = len(pdf)
+                if total_pdf_pages == 0:
+                    total_pdf_pages = pdfium_total
+                for idx in range(pdfium_total):
+                    page_num = idx + 1
+                    if not any(p["page"] == page_num for p in pages):
+                        page = pdf[idx]
+                        tp = None
+                        t = ""
+                        try:
+                            tp = page.get_textpage()
+                            t = tp.get_text_range() or ""
+                        except Exception:
+                            pass
+                        finally:
+                            if tp and hasattr(tp, "close"):
+                                try:
+                                    tp.close()
+                                except Exception:
+                                    pass
+                            if hasattr(page, "close"):
+                                try:
+                                    page.close()
+                                except Exception:
+                                    pass
+                        if t.strip():
+                            pages.append({
+                                "filename": filename,
+                                "page": page_num,
+                                "text": clean_text_to_markdown(t)
+                            })
+            finally:
+                pdf.close()
+        except Exception as e:
+            print(f"pypdfium2 extraction notice: {e}")
+
+    # If completely empty/scanned document (no textual streams on any page):
+    if not pages and total_pdf_pages > 0:
+        for p_num in range(1, total_pdf_pages + 1):
             pages.append({
                 "filename": filename,
-                "page": idx + 1,
-                "text": md_text
+                "page": p_num,
+                "text": f"Page {p_num} (Visual / Scanned Content)"
             })
+
+    pages.sort(key=lambda x: x["page"])
     return pages
 
 def extract_pages_from_text(raw_text: str, filename: str) -> List[Dict[str, Any]]:

@@ -198,8 +198,19 @@ def extract_halo_crops(
                     print(f"Object detection on page {page_num} warning: {obj_err}")
 
             # If no image objects found, fall back to checking text for tables
-            text_page = page.get_textpage()
-            page_text = text_page.get_text_range()
+            text_page = None
+            page_text = ""
+            try:
+                text_page = page.get_textpage()
+                page_text = text_page.get_text_range() or ""
+            except Exception as tp_err:
+                pass
+            finally:
+                if text_page and hasattr(text_page, "close"):
+                    try:
+                        text_page.close()
+                    except Exception:
+                        pass
 
             # Check for ASCII/Markdown tables
             table_matches = re.finditer(
@@ -282,6 +293,11 @@ def extract_halo_crops(
                     confidence=geom_conf,
                 )
                 visual_nodes.append(node)
+            if hasattr(page, "close"):
+                try:
+                    page.close()
+                except Exception:
+                    pass
     finally:
         pdf.close()
 

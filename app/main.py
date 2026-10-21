@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
+from starlette.concurrency import iterate_in_threadpool
 from pydantic import BaseModel
 
 from app.config import (
@@ -298,6 +299,24 @@ async def export_audit_report(payload: ExportReportRequest):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+def get_doc_context(doc_id: Optional[str] = None, session_id: Optional[str] = None):
+    """
+    Resolves target doc_id, vault_entry, retriever, classification, and AST.
+    Prioritizes per-request doc_id, followed by session-bound doc_id, then active default.
+    """
+    if doc_id and doc_id in DOCUMENT_VAULT:
+        target_doc_id = doc_id
+    elif session_id and session_id in SESSION_REGISTRY:
+        target_doc_id = SESSION_REGISTRY[session_id].get("active_doc_id", ACTIVE_DOC_ID)
+    else:
+        target_doc_id = ACTIVE_DOC_ID
+
+    vault_entry = DOCUMENT_VAULT.get(target_doc_id)
+    retriever = vault_entry["retriever"] if vault_entry else ACTIVE_RETRIEVER
+    classification = vault_entry["classification"] if vault_entry else ACTIVE_CLASSIFICATION
+    ast = DOCUMENT_ASTS.get(target_doc_id)
+    return target_doc_id, vault_entry, retriever, classification, ast
+
 @app.post("/ask")
 @app.post("/query")
 async def ask_question(payload: QueryRequest):
@@ -308,20 +327,9 @@ async def ask_question(payload: QueryRequest):
     """
     global ACTIVE_RETRIEVER, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
 
-    # Resolve document context: per-request doc_id > per-session doc_id > global active doc
-    session_id = payload.session_id
-    req_doc_id = payload.doc_id
-    if req_doc_id and req_doc_id in DOCUMENT_VAULT:
-        target_doc_id = req_doc_id
-    elif session_id and session_id in SESSION_REGISTRY:
-        target_doc_id = SESSION_REGISTRY[session_id].get("active_doc_id", ACTIVE_DOC_ID)
-    else:
-        target_doc_id = ACTIVE_DOC_ID
-
-    vault_entry = DOCUMENT_VAULT.get(target_doc_id)
-    retriever = vault_entry["retriever"] if vault_entry else ACTIVE_RETRIEVER
-    classification = vault_entry["classification"] if vault_entry else ACTIVE_CLASSIFICATION
-    ast = DOCUMENT_ASTS.get(target_doc_id)
+    target_doc_id, vault_entry, retriever, classification, ast = get_doc_context(
+        payload.doc_id, payload.session_id
+    )
 
     if not retriever:
         raise HTTPException(status_code=400, detail="No document loaded. Please upload a document first.")
@@ -492,69 +500,57 @@ async def ask_stream(
     session_id: Optional[str] = None,
     model: Optional[str] = None
 ):
-    """Real-time SSE token streaming endpoint with Session Isolation."""
-    global ACTIVE_RETRIEVER, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
-
-    # Resolve session document
-    if doc_id and doc_id in DOCUMENT_VAULT:
-        target_doc_id = doc_id
-    elif session_id and session_id in SESSION_REGISTRY:
-        target_doc_id = SESSION_REGISTRY[session_id].get("active_doc_id", ACTIVE_DOC_ID)
-    else:
-        target_doc_id = ACTIVE_DOC_ID
-
-    vault_entry = DOCUMENT_VAULT.get(target_doc_id)
-    retriever = vault_entry["retriever"] if vault_entry else ACTIVE_RETRIEVER
-    classification = vault_entry["classification"] if vault_entry else ACTIVE_CLASSIFICATION
+    """Real-time SSE token streaming endpoint with Session Isolation and non-blocking event loop execution."""
+    target_doc_id, vault_entry, retriever, classification, _ = get_doc_context(doc_id, session_id)
 
     if not retriever:
         return StreamingResponse(iter(["Error: No document loaded."]), media_type="text/plain")
 
-    retrieved = retriever.retrieve(query, top_k=TOP_K)
-    eval_result = evaluate_relevance(retrieved, query=query)
+    clean_query = query.strip()
+    if not clean_query:
+        return StreamingResponse(iter(["Error: Query cannot be empty."]), media_type="text/plain")
+
+    retrieved = retriever.retrieve(clean_query, top_k=TOP_K)
+    eval_result = evaluate_relevance(retrieved, query=clean_query)
 
     if eval_result["status"] == "REFUSE":
         async def refuse_generator():
-            yield eval_result["reason"]
+            yield f"⚠️ UNVERIFIABLE: {eval_result['reason']}"
         return StreamingResponse(refuse_generator(), media_type="text/plain")
 
     persona = classification.get("prompt_addon", "")
     model_choice = model or get_gemma_model()
     return StreamingResponse(
-        stream_grounded_answer(query, retrieved, persona, model_choice),
+        iterate_in_threadpool(stream_grounded_answer(clean_query, retrieved, persona, model_choice)),
         media_type="text/plain"
     )
 
-    if eval_result["status"] == "REFUSE":
-        return StreamingResponse(
-            iter([f"⚠️ UNVERIFIABLE: {eval_result['reason']}"]),
-            media_type="text/plain"
-        )
-
-    persona = ACTIVE_CLASSIFICATION.get("prompt_addon", "")
-    return StreamingResponse(
-        stream_grounded_answer(query, retrieved, persona),
-        media_type="text/event-stream"
-    )
-
 @app.get("/api/ast")
-def get_active_document_ast():
-    """Returns the complete Document AST for visual graph rendering."""
-    if not ACTIVE_DOC_ID or ACTIVE_DOC_ID not in DOCUMENT_ASTS:
+def get_active_document_ast(
+    doc_id: Optional[str] = None,
+    session_id: Optional[str] = None
+):
+    """Returns the complete Document AST for visual graph rendering with session support."""
+    target_doc_id, _, _, _, ast = get_doc_context(doc_id, session_id)
+    if not target_doc_id or not ast:
         raise HTTPException(status_code=404, detail="No active Document AST available.")
-    return DOCUMENT_ASTS[ACTIVE_DOC_ID].to_dict()
+    return ast.to_dict()
 
 @app.get("/api/discrepancies")
 @app.get("/api/ast/discrepancies")
-def get_active_discrepancies():
-    """Runs automated Cross-Modal Contradiction Scanner across active AST."""
-    if not ACTIVE_DOC_ID or ACTIVE_DOC_ID not in DOCUMENT_ASTS:
+def get_active_discrepancies(
+    doc_id: Optional[str] = None,
+    session_id: Optional[str] = None
+):
+    """Runs automated Cross-Modal Contradiction Scanner across target/session AST."""
+    target_doc_id, vault_entry, _, _, ast = get_doc_context(doc_id, session_id)
+    if not target_doc_id or not ast:
         raise HTTPException(status_code=400, detail="No document loaded. Please upload or load a document first.")
     
-    ast = DOCUMENT_ASTS[ACTIVE_DOC_ID]
     use_llm_verification = USE_GOOGLE_GENAI and bool(GEMINI_API_KEY)
     report = scan_ast_for_discrepancies(ast, use_llm=use_llm_verification)
-    report["filename"] = DOCUMENT_VAULT.get(ACTIVE_DOC_ID, {}).get("filename", "Current Document")
+    report["filename"] = vault_entry.get("filename", "Current Document") if vault_entry else "Current Document"
+    report["doc_id"] = target_doc_id
     return report
 
 @app.get("/api/ast/{doc_id}")
@@ -783,14 +779,19 @@ def select_vault_document(doc_id: str):
     }
 
 @app.get("/compliance-audit")
-def get_compliance_audit():
-    """Runs automated 7-point pre-flight compliance audit across the active document."""
-    if not ACTIVE_RETRIEVER:
+def get_compliance_audit(
+    doc_id: Optional[str] = None,
+    session_id: Optional[str] = None
+):
+    """Runs automated 7-point pre-flight compliance audit across the target/session document."""
+    target_doc_id, vault_entry, retriever, classification, _ = get_doc_context(doc_id, session_id)
+    if not retriever:
         raise HTTPException(status_code=400, detail="No document loaded. Please upload or load a document first.")
     
-    report = run_compliance_audit(ACTIVE_RETRIEVER)
-    report["filename"] = DOCUMENT_VAULT.get(ACTIVE_DOC_ID, {}).get("filename", "Current Document")
-    report["classification"] = ACTIVE_CLASSIFICATION
+    report = run_compliance_audit(retriever)
+    report["doc_id"] = target_doc_id
+    report["filename"] = vault_entry.get("filename", "Current Document") if vault_entry else "Current Document"
+    report["classification"] = classification
     return report
 
 
