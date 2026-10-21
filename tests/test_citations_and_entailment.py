@@ -92,7 +92,9 @@ def test_evaluator_honest_claim_evidence_signals():
     res = evaluate_relevance(chunks, query=query)
     assert res["status"] == "SYNTHESIZE"
     assert res["grounding_verdict"] == "SUPPORTED"
-    assert res["claim_evidence_verified"] is True
+    # A retrieval gate cannot certify claims in an answer that does not exist yet.
+    assert res["claim_evidence_verified"] is False
+    assert res["retrieval_evidence_available"] is True
     assert res["heuristic_alignment_score"] > 0.70
     assert res["evaluation_method"] == "heuristic_proposition_gate"
     # Backward compatibility

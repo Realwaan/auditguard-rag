@@ -71,7 +71,7 @@ def test_compliance_audit_scanner():
 
 def test_post_generation_guardrail_verification():
     from app.evaluator import verify_generated_answer
-    retrieved = [{"citation_id": 1, "parent_text": "Uptime is 99.9%"}, {"citation_id": 2, "parent_text": "Penalty is 15%"}]
+    retrieved = [{"citation_id": 1, "parent_text": "Uptime is 99.9%"}, {"citation_id": 2, "parent_text": "Penalty credit is 15%"}]
     initial = {"status": "SYNTHESIZE", "confidence": 82.0, "badge": "🛡️ GROUNDED"}
 
     # Valid citation [1] and [2]

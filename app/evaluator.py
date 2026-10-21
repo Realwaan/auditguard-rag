@@ -19,7 +19,9 @@ STOP_WORDS = {
     "should", "so", "some", "such", "than", "that", "the", "their", "theirs", "them", "themselves", 
     "then", "there", "these", "they", "this", "those", "through", "to", "too", "under", "until", 
     "up", "very", "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", 
-    "why", "with", "would", "you", "your", "yours", "yourself", "yourselves"
+    "why", "with", "would", "you", "your", "yours", "yourself", "yourselves",
+    "please", "explain", "describe", "define", "tell", "cite", "exact", "explicitly",
+    "provided", "document", "documents", "excerpt", "excerpts", "page", "pages"
 }
 
 NUMBER_WORDS = {
@@ -36,8 +38,18 @@ NEGATION_WORDS = {
 
 def extract_query_keywords(query: str) -> List[str]:
     """Extract content-bearing keywords from query using word boundaries, filtering common stopwords."""
-    tokens = re.findall(r'\b[a-zA-Z0-9_\-\.]{3,}\b', query.lower())
-    return [t for t in tokens if t not in STOP_WORDS]
+    tokens = re.findall(r'\b[a-zA-Z0-9_]+\b', query.lower())
+    return list(dict.fromkeys(t for t in tokens if len(t) >= 2 and t not in STOP_WORDS))
+
+
+def keyword_present(keyword: str, text: str) -> bool:
+    """Match whole words, including ordinary singular/plural forms."""
+    forms = {keyword}
+    if len(keyword) > 4 and keyword.endswith("s") and not keyword.endswith(("ss", "us", "is")):
+        forms.add(keyword[:-1])
+    elif len(keyword) > 3:
+        forms.add(keyword + "s")
+    return any(re.search(r'\b' + re.escape(form) + r'\b', text, re.I) for form in forms)
 
 def evaluate_heuristic_entailment(
     context_text: str,
@@ -79,15 +91,21 @@ def evaluate_heuristic_entailment(
     q_lower = query.lower()
 
     # 1. Quantitative vs Descriptive Answer Target Check
-    is_quantitative = any(w in q_lower for w in [
-        "what percentage", "how much", "how many", "rate", "penalty credit", 
-        "uptime", "availability", "dollar", "cost", "fee", "cap", "sla"
-    ])
+    # Match requested quantities, not substrings such as "rate" in "corporate",
+    # nor descriptive questions such as "What is an SLA?".
+    is_quantitative = bool(re.search(
+        r'\b(?:percentage|percent|how much|how many|how long|amount|threshold)\b', q_lower
+    ))
     ctx_numbers = re.findall(r'\b\d+(?:\.\d+)?%?\b', ctx_lower)
     ctx_word_numbers = [w for w in NUMBER_WORDS if re.search(r'\b' + re.escape(w) + r'\b', ctx_lower)]
     has_numerical_target = bool(ctx_numbers) or bool(ctx_word_numbers)
+    if re.search(r'\b(?:percentage|percent)\b', q_lower):
+        number_names = "|".join(sorted(NUMBER_WORDS - {"percent", "percentage"}))
+        has_numerical_target = bool(re.search(
+            rf'(?:\d+(?:\.\d+)?|\b(?:{number_names}))\s*(?:%|percent\b)', ctx_lower
+        ))
 
-    if is_quantitative and not has_numerical_target and lexical_recall < 0.60:
+    if is_quantitative and not has_numerical_target:
         # Context is on-topic but lacks the actual numerical figure requested
         return {
             "verdict": "NEUTRAL",
@@ -98,25 +116,12 @@ def evaluate_heuristic_entailment(
             "method": "heuristic_target_verification"
         }
 
-    # 2. Polarity / Negation Divergence Check
-    q_has_negation = any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in NEGATION_WORDS)
-    ctx_has_negation = any(re.search(r'\b' + re.escape(w) + r'\b', ctx_lower) for w in NEGATION_WORDS)
-    polarity_divergence = (q_has_negation != ctx_has_negation) and (lexical_recall >= 0.50)
+    # Questions are not factual assertions: negation in a source is not a contradiction of a question.
 
     # 3. Proposition alignment probability
     has_answer_target = has_numerical_target if is_quantitative else (lexical_recall >= 0.40)
     
     if top_dense >= SIMILARITY_THRESHOLD and has_answer_target:
-        if polarity_divergence and not q_has_negation:
-            # Query is affirmative but context contains strict negative/prohibition
-            return {
-                "verdict": "CONTRADICTORY",
-                "entailment_prob": round(top_dense * 0.4, 3),
-                "is_answer_bearing": True,
-                "reason": "Retrieved context asserts restrictive or negative conditions contrary to affirmative query proposition.",
-                "method": "heuristic_polarity_divergence"
-            }
-        
         # Genuine entailment: Evidence provides the facts needed to answer
         entailment_prob = round(0.65 + 0.25 * min(1.0, top_dense) + 0.10 * min(1.0, lexical_recall), 3)
         return {
@@ -184,12 +189,12 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
     if query_keywords:
         matched_kws = [
             kw for kw in query_keywords 
-            if re.search(r'\b' + re.escape(kw) + r'\b', combined_context)
+            if keyword_present(kw, combined_context)
         ]
         lexical_recall = len(matched_kws) / max(1, len(query_keywords))
     else:
         # If no query string passed, rely on dense score alone
-        lexical_recall = top_dense
+        lexical_recall = top_dense if not query else 0.0
 
     # Escalation check
     is_promoted = any(c.get("escalated_from") == "whole_page_scan" for c in retrieved_chunks)
@@ -208,7 +213,7 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
     eval_method = nli_eval.get("method", "heuristic_proposition_gate")
 
     # Refusal decision: Requires positive entailment or minimum dense and keyword presence
-    if nli_verdict == "CONTRADICTION":
+    if nli_verdict in ("CONTRADICTION", "CONTRADICTORY"):
         return {
             "status": "REFUSE",
             "confidence": confidence_pct,
@@ -267,7 +272,9 @@ def evaluate_relevance(retrieved_chunks: List[Dict[str, Any]], query: str = "") 
         "lexical_recall": round(lexical_recall, 3),
         "grounding_verdict": "SUPPORTED",
         "heuristic_alignment_score": nli_prob,
-        "claim_evidence_verified": True,
+        # Retrieval relevance cannot verify an answer that has not been generated.
+        "claim_evidence_verified": False,
+        "retrieval_evidence_available": True,
         "evaluation_method": eval_method,
         # Aliases for backward compatibility
         "nli_verdict": nli_verdict,
@@ -283,6 +290,9 @@ def verify_generated_answer(
     answer: str,
     retrieved_chunks: List[Dict[str, Any]],
     eval_result: Dict[str, Any],
+    query: str = "",
+    citation_audit: Optional[Dict[str, Any]] = None,
+    is_fallback: bool = False,
 ) -> Dict[str, Any]:
     """
     Post-Generation Guardrail:
@@ -290,15 +300,17 @@ def verify_generated_answer(
     2. Audits all inline citation markers [1], [2], etc. against the retrieved chunk IDs.
     """
     updated = dict(eval_result)
-    if not answer:
-        return updated
+    from app.generator import is_refusal_answer, verify_citations_grounding
 
-    ans_lower = answer.strip().lower()
-    if "i cannot verify this information in the provided document excerpts" in ans_lower:
+    updated["claim_evidence_verified"] = False
+    if not answer.strip() or is_refusal_answer(answer):
         updated["status"] = "REFUSE"
         updated["nli_verdict"] = "NEUTRAL (UNVERIFIABLE)"
         updated["grounding_verdict"] = "UNVERIFIABLE"
         updated["claim_evidence_verified"] = False
+        updated["citation_verified"] = False
+        updated["verified_citations"] = []
+        updated["invalid_citations"] = []
         updated["badge"] = f"⚠️ UNVERIFIABLE IN EXCERPTS ({updated.get('confidence', 0.0)}% Retrieval)"
         updated["reason"] = "Retrieved excerpts were topically related but did not contain verifiable facts to answer this specific question."
         return updated
@@ -311,4 +323,25 @@ def verify_generated_answer(
     updated["verified_citations"] = verified_citations
     updated["invalid_citations"] = invalid_citations
     updated["citation_verified"] = len(verified_citations) > 0 and len(invalid_citations) == 0
+    audit = citation_audit if citation_audit is not None else verify_citations_grounding(answer, retrieved_chunks)
+    updated["citation_verified"] = updated["citation_verified"] and audit.get("all_supported", False)
+    keywords = extract_query_keywords(query)
+    coverage = sum(
+        keyword_present(k, answer) or (k in {"percent", "percentage"} and "%" in answer)
+        for k in keywords
+    ) / len(keywords) if keywords else 1.0
+    updated["answer_keyword_coverage"] = round(coverage, 3)
+    if not updated["citation_verified"] or coverage < 0.60 or is_fallback:
+        updated["status"] = "CAUTION_UNSUPPORTED_CITATION"
+        updated["grounding_verdict"] = "UNVERIFIED"
+        updated["nli_verdict"] = "UNVERIFIED"
+        updated["badge"] = "CAUTION: Answer requires review"
+        updated["reason"] = (
+            "The answer may not address the requested topic; review the cited excerpts."
+            if coverage < 0.60 else "The generated answer did not pass all citation checks."
+        )
+    else:
+        updated["nli_verdict"] = "HEURISTIC_SUPPORTED"
+        updated["badge"] = f"CITATIONS CHECKED ({updated.get('confidence', 0.0)}% Retrieval)"
+        updated["reason"] = "Citation and keyword checks passed; these heuristic checks do not establish semantic entailment."
     return updated

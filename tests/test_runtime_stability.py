@@ -10,7 +10,15 @@ from app.ast_builder import extract_halo_crops
 
 client = TestClient(app)
 
-def test_ask_stream_success_and_refusal():
+def test_ask_stream_success_and_refusal(monkeypatch):
+    # A deterministic provider makes this a test of the real retrieval/stream path,
+    # independent of API credentials or network availability.
+    from types import SimpleNamespace
+    import app.generator as generator
+    monkeypatch.setattr(generator, "USE_GOOGLE_GENAI", False)
+    frames = [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Guaranteed uptime is 99.9% [1]."))])]
+    provider = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: iter(frames))))
+    monkeypatch.setattr(generator, "get_openai_client", lambda: provider)
     # 1. First ensure sample document is loaded
     load_res = client.post("/load-sample")
     assert load_res.status_code == 200

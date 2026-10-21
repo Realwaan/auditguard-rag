@@ -1,12 +1,13 @@
 import os
 import base64
 import mimetypes
+import re
 from pathlib import Path
 from typing import Optional, Tuple, List, Union, Dict, Any
 from openai import OpenAI
 from app.config import (
     BASE_DIR, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL,
-    GEMINI_API_KEY, USE_GOOGLE_GENAI, get_gemma_model
+    GEMINI_API_KEY, USE_GOOGLE_GENAI, get_gemma_model, LLM_TIMEOUT_SECONDS
 )
 
 try:
@@ -18,11 +19,21 @@ except ImportError:
 
 def is_llm_configured() -> bool:
     """Returns True if Google GenAI key or custom OpenAI endpoint is configured."""
-    return bool((USE_GOOGLE_GENAI and GEMINI_API_KEY) or (LLM_API_KEY and LLM_API_KEY != "local-or-alma-key") or LLM_BASE_URL)
+    return bool((USE_GOOGLE_GENAI and _HAS_GENAI and GEMINI_API_KEY) or
+                (LLM_API_KEY and LLM_API_KEY != "local-or-alma-key") or
+                (LLM_BASE_URL and LLM_BASE_URL != "https://api.openai.com/v1"))
+
+
+def get_default_model() -> str:
+    return get_gemma_model() if USE_GOOGLE_GENAI and GEMINI_API_KEY and _HAS_GENAI else LLM_MODEL
 
 def get_genai_client():
     if _HAS_GENAI and GEMINI_API_KEY:
-        return genai.Client(api_key=GEMINI_API_KEY)
+        try:
+            return genai.Client(api_key=GEMINI_API_KEY,
+                                http_options=types.HttpOptions(timeout=int(LLM_TIMEOUT_SECONDS * 1000)))
+        except Exception as exc:
+            print(f"[AuditGuard Google client unavailable]: {type(exc).__name__}")
     return None
 
 def get_openai_client() -> OpenAI:
@@ -30,7 +41,7 @@ def get_openai_client() -> OpenAI:
     return OpenAI(
         base_url=LLM_BASE_URL,
         api_key=LLM_API_KEY or "alma-hackathon-token",
-        timeout=15.0,
+        timeout=LLM_TIMEOUT_SECONDS,
         max_retries=1
     )
 
@@ -43,7 +54,13 @@ def load_image_bytes(image_url: str) -> Optional[Tuple[bytes, str]]:
         return None
     
     clean_url = str(image_url).split("?")[0].strip()
-    if clean_url.startswith("/static/"):
+    lazy_preview = re.fullmatch(r'/api/preview/([\w-]+)/(\d+)', clean_url)
+    if lazy_preview:
+        from app.ingest import get_or_render_page_image
+        file_path = get_or_render_page_image(lazy_preview[1], int(lazy_preview[2]))
+        if file_path is None:
+            return None
+    elif clean_url.startswith("/static/"):
         rel_path = clean_url[len("/static/"):]
         file_path = BASE_DIR / "app" / "static" / rel_path
     elif clean_url.startswith("static/"):
@@ -54,6 +71,13 @@ def load_image_bytes(image_url: str) -> Optional[Tuple[bytes, str]]:
         if not file_path.is_absolute():
             file_path = BASE_DIR / clean_url
 
+    # Only generated visual assets may be included in model requests.
+    allowed_roots = [(BASE_DIR / "app" / "static" / name).resolve() for name in ("previews", "crops")]
+    file_path = file_path.resolve()
+    if not any(file_path.is_relative_to(root) for root in allowed_roots):
+        return None
+    if file_path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+        return None
     if not file_path.exists() or not file_path.is_file():
         return None
 
@@ -92,7 +116,7 @@ def make_openai_image_part(data: bytes, mime_type: str) -> Dict[str, Any]:
         }
     }
 
-def call_plain_gemma(prompt: str) -> str:
+def call_plain_gemma(prompt: str, model_override: Optional[str] = None) -> str:
     """
     Calls Gemma 4 WITHOUT any RAG context.
     Used for the live 'Hallucination Radar' side-by-side comparison on stage.
@@ -103,7 +127,7 @@ def call_plain_gemma(prompt: str) -> str:
         try:
             client = get_genai_client()
             response = client.models.generate_content(
-                model=get_gemma_model(),
+                model=model_override or get_gemma_model(),
                 contents=concise_prompt,
             )
             if response and response.text:
@@ -111,10 +135,10 @@ def call_plain_gemma(prompt: str) -> str:
         except Exception as e:
             print(f"[AuditGuard Google GenAI Error - Plain Gemma Baseline]: {e}")
 
-    client = get_openai_client()
     try:
+        client = get_openai_client()
         response = client.chat.completions.create(
-            model=LLM_MODEL,
+            model=model_override or LLM_MODEL,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant. Answer the user's question directly."},
                 {"role": "user", "content": prompt}

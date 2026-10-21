@@ -1,7 +1,14 @@
 import numpy as np
+import re
 from rank_bm25 import BM25Okapi
 from typing import List, Dict, Any
 from app.embeddings import embed_query
+from app.evaluator import extract_query_keywords, keyword_present
+
+
+def _search_tokens(text: str) -> List[str]:
+    """Use the same punctuation-insensitive tokens for documents and questions."""
+    return re.findall(r'\b\w+\b', text.lower())
 
 class HybridRetriever:
     """
@@ -29,15 +36,15 @@ class HybridRetriever:
             self.bm25 = None
             return
 
-        tokenized_corpus = [c["child_text"].lower().split() for c in chunks]
+        tokenized_corpus = [_search_tokens(c["child_text"]) or [""] for c in chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
 
     def retrieve(self, query: str, top_k: int = 4, k_rrf: int = 60) -> List[Dict[str, Any]]:
-        if not self.chunks or len(self.chunks) == 0 or self.bm25 is None:
+        if not self.chunks or self.bm25 is None or top_k <= 0:
             return []
 
         # 1. Sparse BM25 Search with expanded candidate pool to prevent deduplication starvation
-        query_tokens = query.lower().split()
+        query_tokens = _search_tokens(query)
         bm25_scores = self.bm25.get_scores(query_tokens)
         candidate_window = min(len(self.chunks), max(50, top_k * 8))
         bm25_rank_indices = np.argsort(bm25_scores)[::-1][:candidate_window]
@@ -81,9 +88,10 @@ class HybridRetriever:
         for idx in sorted_indices:
             chunk = self.chunks[idx].copy()
             parent = chunk.get("parent_text", "")
-            if parent in seen_parents:
+            parent_key = (chunk.get("filename"), chunk.get("page"), parent or chunk.get("child_text", ""))
+            if parent_key in seen_parents:
                 continue
-            seen_parents.add(parent)
+            seen_parents.add(parent_key)
 
             chunk["citation_id"] = citation_num
             chunk["dense_score"] = float(dense_scores[idx])
@@ -114,7 +122,7 @@ class HybridRetriever:
             return []
 
         # 1. Determine candidate pages to scan
-        pages_to_check = candidate_pages
+        pages_to_check = list(dict.fromkeys(candidate_pages))
         if not pages_to_check:
             if ast and hasattr(ast, "get_all_pages"):
                 pages_to_check = ast.get_all_pages()
@@ -126,11 +134,7 @@ class HybridRetriever:
 
         import re
         q_vec = embed_query(query)
-        stop_words = {"what", "is", "the", "are", "how", "for", "and", "with", "does", "can", "in", "of", "to", "a"}
-        raw_tokens = [re.sub(r'[^a-zA-Z0-9]', '', t) for t in query.lower().split()]
-        query_tokens = [t for t in raw_tokens if len(t) > 2 and t not in stop_words]
-        if not query_tokens:
-            query_tokens = [t for t in raw_tokens if len(t) > 2]
+        query_tokens = extract_query_keywords(query)
 
         best_page = None
         best_score = 0.0
@@ -158,7 +162,7 @@ class HybridRetriever:
 
             # Lexical coverage of query tokens across the whole page text using exact word boundaries
             page_lower = page_text.lower()
-            matching_tokens = sum(1 for t in query_tokens if re.search(r'\b' + re.escape(t) + r'\b', page_lower))
+            matching_tokens = sum(keyword_present(t, page_lower) for t in query_tokens)
             lexical_ratio = matching_tokens / max(1, len(query_tokens))
 
             # Calibrated whole-page relevance:

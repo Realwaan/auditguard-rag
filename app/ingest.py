@@ -18,6 +18,8 @@ def get_or_render_page_image(doc_prefix: str, page_num: int) -> Path | None:
     On-demand single-page renderer for large documents (e.g. 300-page manuals).
     Renders just the requested page in ~30ms and caches it to disk in compressed WebP format (80% quality).
     """
+    if not re.fullmatch(r'[\w-]+', doc_prefix) or page_num < 1:
+        return None
     file_name = f"{doc_prefix}_page_{page_num}.webp"
     file_path = PREVIEWS_DIR / file_name
     if file_path.exists():

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,9 +28,9 @@ from app.vector_store import LanceVectorStore
 from app.discrepancy_scanner import scan_ast_for_discrepancies
 from app.embeddings import embed_texts, embed_query
 from app.retriever import HybridRetriever
-from app.evaluator import evaluate_relevance
-from app.generator import generate_grounded_answer, stream_grounded_answer
-from app.llm import call_plain_gemma, is_llm_configured
+from app.evaluator import evaluate_relevance, verify_generated_answer
+from app.generator import generate_grounded_answer, stream_grounded_answer, REFUSAL_TEXT
+from app.llm import call_plain_gemma, is_llm_configured, get_default_model
 from app.audit_scanner import run_compliance_audit
 
 app = FastAPI(title="AuditGuard RAG • Hierarchical Multimodal Tree-RAG", version="2.0.0")
@@ -92,7 +93,7 @@ def health_check():
         "ast_loaded": ACTIVE_DOC_ID in DOCUMENT_ASTS,
         "lancedb_ready": lancedb_ready,
         "llm_configured": is_llm_configured(),
-        "model": get_gemma_model(),
+        "model": get_default_model(),
         "engine": "Google GenAI (Native)" if USE_GOOGLE_GENAI else "OpenAI-Compatible (ALMA)",
         "use_google_genai": USE_GOOGLE_GENAI,
         "gemini_api_key_active": bool(GEMINI_API_KEY)
@@ -124,15 +125,18 @@ async def _ingest_document_into_vault(
         pdf_bytes=pdf_bytes,
         doc_title=filename
     )
-    DOCUMENT_ASTS[doc_id] = ast
 
     # 2. Hierarchical Chunking + Automatic Document Type Classification
     chunks, classification = hierarchical_chunk(pages, page_images, ast=ast)
-    ACTIVE_CLASSIFICATION = classification
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Could not extract readable content from document.")
 
     # Attach accurate AST node metadata to chunks by matching parent paragraph text
     para_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.PARAGRAPH]
     for c in chunks:
+        if c.get("ast_node_id") in ast.nodes:
+            c["linked_node_ids"] = list(ast.nodes[c["ast_node_id"]].linked_node_ids)
+            continue  # Preserve the chunker's exact AST mapping.
         p_text = c.get("parent_text", "").strip()
         matched = None
         if p_text:
@@ -171,6 +175,8 @@ async def _ingest_document_into_vault(
     ACTIVE_CHUNKS = chunks
     ACTIVE_RETRIEVER = retriever
     ACTIVE_DOC_ID = doc_id
+    ACTIVE_CLASSIFICATION = classification
+    DOCUMENT_ASTS[doc_id] = ast
 
     indexing_ms = round((time.perf_counter() - t_start) * 1000, 2)
     cross_links_count = len(ast.get_cross_modal_links())
@@ -210,12 +216,14 @@ async def upload_document(file: UploadFile = File(...)):
     Extracts pages, builds the 3-Tier Document AST, extracts collision-bounded
     halo crops, and indexes into LanceDB in-process without any upfront LLM API costs.
     """
-    contents = await file.read()
+    contents = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded file exceeds the configured size limit.")
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     filename = (file.filename or "uploaded_doc.pdf").strip()
-    allowed_exts = (".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".csv", ".json", ".log")
+    allowed_exts = (".pdf", ".docx", ".pptx", ".txt", ".md", ".csv", ".json", ".log")
     if not filename.lower().endswith(allowed_exts):
         raise HTTPException(
             status_code=400,
@@ -231,33 +239,42 @@ async def upload_document(file: UploadFile = File(...)):
     is_pdf = (ext == ".pdf")
     page_images = {}
 
-    if is_pdf:
-        pages = await asyncio.to_thread(extract_pages_from_pdf, contents, filename)
-        page_images = await asyncio.to_thread(render_page_previews, contents, doc_id)
-    elif ext in (".docx", ".doc"):
-        pages = await asyncio.to_thread(extract_pages_from_docx, contents, filename)
-    elif ext in (".pptx", ".ppt"):
-        pages = await asyncio.to_thread(extract_pages_from_pptx, contents, filename)
-    elif ext in (".txt", ".md", ".csv", ".json", ".log"):
-        text_str = contents.decode("utf-8", errors="replace")
-        pages = extract_pages_from_text(text_str, filename)
-    else:
-        try:
-            text_str = contents.decode("utf-8")
-        except UnicodeDecodeError:
-            text_str = contents.decode("latin-1", errors="replace")
-        pages = extract_pages_from_text(text_str, filename)
+    try:
+        if is_pdf:
+            pages = await asyncio.to_thread(extract_pages_from_pdf, contents, filename)
+            page_images = await asyncio.to_thread(render_page_previews, contents, doc_id)
+        elif ext in (".docx", ".doc"):
+            pages = await asyncio.to_thread(extract_pages_from_docx, contents, filename)
+        elif ext in (".pptx", ".ppt"):
+            pages = await asyncio.to_thread(extract_pages_from_pptx, contents, filename)
+        elif ext in (".txt", ".md", ".csv", ".json", ".log"):
+            text_str = contents.decode("utf-8", errors="replace")
+            pages = extract_pages_from_text(text_str, filename)
+        else:
+            try:
+                text_str = contents.decode("utf-8")
+            except UnicodeDecodeError:
+                text_str = contents.decode("latin-1", errors="replace")
+            pages = extract_pages_from_text(text_str, filename)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not parse this document. Check that the file is valid and not encrypted.") from exc
 
-    if not pages:
+    if not pages or not any(p.get("text", "").strip() for p in pages):
         raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
 
-    return await _ingest_document_into_vault(
-        doc_id=doc_id,
-        filename=filename,
-        pages=pages,
-        page_images=page_images,
-        pdf_bytes=contents if is_pdf else None,
-    )
+    try:
+        return await _ingest_document_into_vault(
+            doc_id=doc_id,
+            filename=filename,
+            pages=pages,
+            page_images=page_images,
+            pdf_bytes=contents if is_pdf else None,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Document indexing is unavailable. The previously loaded document has been retained; please retry.") from exc
+
 
 class ExportReportRequest(BaseModel):
     query: str
@@ -426,7 +443,26 @@ def execute_rag_retrieval_and_eval(
                 retrieved = escalated_chunks
                 eval_result = escalated_eval
 
+    retrieval_ms = round((time.perf_counter() - t0) * 1000, 2)
     return retrieved, eval_result, retrieval_ms
+
+
+def greeting_response(query: str, doc_id: str, classification: dict) -> Optional[dict]:
+    """Recognize complete greetings only; 'hi, what is the SLA?' remains a query."""
+    normalized = query.lower().strip().rstrip(".!?,").strip()
+    normalized = " ".join(normalized.split())
+    if normalized not in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "howdy"}:
+        return None
+    return {
+        "query": query, "status": "SUCCESS", "answer": "Hello! Ask me a question about your document, or upload one to get started.",
+        "sources": [], "baseline": "", "classification": classification, "doc_id": doc_id,
+        "evaluation": {"status": "CONVERSATION", "confidence": 0.0, "badge": "READY FOR A DOCUMENT QUESTION",
+                       "grounding_verdict": "NOT_APPLICABLE", "nli_verdict": "NOT_APPLICABLE",
+                       "claim_evidence_verified": False, "citation_verified": False},
+        "retrieval_ms": 0.0, "total_ms": 0.0, "estimated_tokens": 0, "tokens": 0,
+        "token_telemetry": {"tokens": 0, "estimated": False}, "is_fallback": False,
+        "generation_mode": "greeting", "model": "AuditGuard greeting",
+    }
 
 @app.post("/ask")
 @app.post("/query")
@@ -442,18 +478,20 @@ async def ask_question(payload: QueryRequest):
         payload.doc_id, payload.session_id
     )
 
-    if not retriever:
-        raise HTTPException(status_code=400, detail="No document loaded. Please upload a document first.")
-
     query = payload.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    greeting = greeting_response(query, target_doc_id, classification)
+    if greeting:
+        return greeting
+    if not retriever:
+        raise HTTPException(status_code=400, detail="No document loaded. Please upload a document first.")
 
     t_total_start = time.perf_counter()
 
     # 1. Unified Retrieval & Grounding Evaluation
-    retrieved, eval_result, retrieval_ms = execute_rag_retrieval_and_eval(
-        retriever, query, ast=ast, top_k=TOP_K
+    retrieved, eval_result, retrieval_ms = await asyncio.to_thread(
+        execute_rag_retrieval_and_eval, retriever, query, ast=ast, top_k=TOP_K
     )
 
     # 2. Token Usage Estimation (~1.33 tokens per English word + 200 system tokens)
@@ -463,7 +501,7 @@ async def ask_question(payload: QueryRequest):
 
     # 3. Check for Defense Refusal
     if eval_result["status"] == "REFUSE":
-        plain_baseline = await asyncio.to_thread(call_plain_gemma, query) if payload.include_baseline else ""
+        plain_baseline = await asyncio.to_thread(call_plain_gemma, query, payload.model) if payload.include_baseline else ""
         return {
             "query": query,
             "status": "REFUSE",
@@ -478,20 +516,20 @@ async def ask_question(payload: QueryRequest):
             "tokens": 0,
             "token_telemetry": {"tokens": 0, "estimated": False},
             "is_fallback": False,
-            "model": payload.model or get_gemma_model(),
+            "model": payload.model or get_default_model(),
             "doc_id": target_doc_id
         }
 
     # 4 & 5. Synthesize Grounded Answer & Hallucination Baseline in PARALLEL (50% Latency Reduction)
     persona = classification.get("prompt_addon", "")
-    model_choice = payload.model or get_gemma_model()
+    model_choice = payload.model or get_default_model()
 
     async def _fetch_grounded():
-        return await asyncio.to_thread(generate_grounded_answer, query, retrieved, persona, model_choice)
+        return await asyncio.to_thread(generate_grounded_answer, query, retrieved, persona, payload.model)
 
     async def _fetch_baseline():
         if payload.include_baseline:
-            return await asyncio.to_thread(call_plain_gemma, query)
+            return await asyncio.to_thread(call_plain_gemma, query, payload.model)
         return ""
 
     grounded_res, plain_baseline = await asyncio.gather(_fetch_grounded(), _fetch_baseline())
@@ -511,17 +549,19 @@ async def ask_question(payload: QueryRequest):
         is_fallback = False
         model_used = model_choice
 
+    if not grounded_answer or not grounded_answer.strip():
+        grounded_answer = REFUSAL_TEXT
+        is_fallback = True
+
     reported_tokens = actual_tokens if actual_tokens > 0 else (0 if is_fallback else estimated_tokens)
-    status = "SUCCESS"
-    citation_verdict = citation_verification.get("verdict", "VERIFIED")
-    
-    if "I cannot verify this information" in grounded_answer:
-        status = "REFUSE"
-        eval_result["status"] = "REFUSE"
-        eval_result["badge"] = "⚠️ OUT-OF-BOUNDS (Refused)"
-    elif not citation_verification.get("all_supported", True) or citation_verdict in ("NO_CITATIONS", "INVALID_CITATION", "UNSUPPORTED_CLAIM"):
-        status = "CAUTION_UNSUPPORTED_CITATION"
-        eval_result["badge"] = f"⚠️ CAUTION: {citation_verdict} Grounding Warning"
+    eval_result = verify_generated_answer(
+        grounded_answer, retrieved, eval_result, query=query,
+        citation_audit=citation_verification or None, is_fallback=is_fallback,
+    )
+    status = "SUCCESS" if eval_result["status"] == "SYNTHESIZE" else eval_result["status"]
+    if is_fallback and status == "REFUSE":
+        eval_result["reason"] = "The inference provider is unavailable or returned no answer. Retrieved sources remain available for inspection."
+        eval_result["badge"] = "MODEL UNAVAILABLE - ANSWER UNVERIFIED"
 
     return {
         "query": query,
@@ -535,7 +575,7 @@ async def ask_question(payload: QueryRequest):
         "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
         "estimated_tokens": reported_tokens,
         "tokens": reported_tokens,
-        "token_telemetry": {"tokens": reported_tokens, "estimated": reported_tokens == estimated_tokens},
+        "token_telemetry": {"tokens": reported_tokens, "estimated": actual_tokens <= 0 and not is_fallback},
         "is_fallback": is_fallback,
         "model": model_used,
         "doc_id": target_doc_id,
@@ -578,16 +618,18 @@ async def ask_stream(
     """Real-time SSE token streaming endpoint with Session Isolation and non-blocking event loop execution."""
     target_doc_id, vault_entry, retriever, classification, ast = get_doc_context(doc_id, session_id)
 
-    if not retriever:
-        return StreamingResponse(iter(["Error: No document loaded."]), media_type="text/plain")
-
     clean_query = query.strip()
     if not clean_query:
         return StreamingResponse(iter(["Error: Query cannot be empty."]), media_type="text/plain")
+    greeting = greeting_response(clean_query, target_doc_id, classification)
+    if greeting:
+        return StreamingResponse(iter([greeting["answer"]]), media_type="text/plain")
+    if not retriever:
+        return StreamingResponse(iter(["Error: No document loaded."]), media_type="text/plain")
 
     # Unified RAG retrieval & evaluation (with cross-modal hydration & whole-page escalation)
-    retrieved, eval_result, _ = execute_rag_retrieval_and_eval(
-        retriever, clean_query, ast=ast, top_k=TOP_K
+    retrieved, eval_result, _ = await asyncio.to_thread(
+        execute_rag_retrieval_and_eval, retriever, clean_query, ast=ast, top_k=TOP_K
     )
 
     if eval_result["status"] == "REFUSE":
@@ -596,7 +638,7 @@ async def ask_stream(
         return StreamingResponse(refuse_generator(), media_type="text/plain")
 
     persona = classification.get("prompt_addon", "")
-    model_choice = model or get_gemma_model()
+    model_choice = model
     return StreamingResponse(
         iterate_in_threadpool(stream_grounded_answer(clean_query, retrieved, persona, model_choice)),
         media_type="text/plain"

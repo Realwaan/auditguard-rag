@@ -359,16 +359,22 @@ async function submitQuery() {
               <div class="p-4 bg-rose-950/40 border border-rose-900/80 rounded-xl text-rose-200">
                 <div class="flex items-center gap-2 mb-2 font-bold text-rose-300">
                   <i data-lucide="shield-alert" class="w-5 h-5 text-rose-400"></i>
-                  <span>DEFENSE REFUSAL ACTIVATED (CRAG Gatekeeper)</span>
+                  <span>${data.is_fallback ? "MODEL UNAVAILABLE" : "ANSWER UNVERIFIABLE"}</span>
                 </div>
                 <p class="text-xs leading-relaxed mb-2">${data.answer}</p>
                 <div class="p-2 rounded bg-rose-950/80 border border-rose-900 text-[11px] font-mono text-rose-300">
-                  Epistemic Humility Rule: When context relevance falls below threshold (τ = 0.50), AuditGuard strictly refuses rather than hallucinating facts.
+                  ${data.evaluation.reason || "The answer could not be verified against the retrieved excerpts."}
                 </div>
               </div>`;
         } else {
             badge.className = "text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-300 font-mono font-bold border border-emerald-700/80 shadow-sm flex items-center gap-1";
             
+            if (data.status.startsWith("CAUTION")) {
+                badge.className = "text-[11px] px-2.5 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-700 font-bold";
+            } else if (data.generation_mode === "greeting") {
+                badge.className = "text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-600";
+            }
+
             const renderedHtml = formatAuditAnswer(data.answer);
             answerContainer.innerHTML = renderedHtml;
         }
@@ -379,7 +385,7 @@ async function submitQuery() {
             const topSource = ACTIVE_SOURCES[0];
             const pageNum = topSource.page || 1;
             const citId = topSource.citation_id || 1;
-            const visualTitle = topSource.linked_visuals ? topSource.linked_visuals[0].title : null;
+            const visualTitle = topSource.linked_visuals?.[0]?.title || null;
 
             pathDisplay.innerHTML = `
               <button onclick="openASTModal()" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-purple-300 border border-purple-800/60 transition flex items-center gap-1 font-mono">
@@ -442,8 +448,8 @@ function openCitationByIndex(idx) {
     const match = ACTIVE_SOURCES.find(s => s.citation_id === Number(idx));
     if (match) {
         openProofDrawer(match);
-    } else if (ACTIVE_SOURCES.length > 0) {
-        openProofDrawer(ACTIVE_SOURCES[0]);
+    } else {
+        showToast("This citation has no matching source.", "error");
     }
 }
 
