@@ -165,8 +165,9 @@ def resolve_unit(token: str) -> Optional[str]:
     return None
 
 def extract_quantities(text: str) -> List[Tuple[float, Optional[str]]]:
-    """Extracts numbers and their canonical units, ignoring citation badges [1], [2]."""
+    """Extracts numbers and their canonical units, ignoring citation badges [1], [2] and calendar quarters (Q1-Q4)."""
     text_clean = re.sub(r'\[\s*\d+\s*\]', '', text)
+    text_clean = re.sub(r'\b[qQ][1-4]\b', '', text_clean)
     normalized = normalize_written_numbers(text_clean).lower()
     pattern = r'([$€£])?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|\b(?:business|working|calendar|consecutive)\s+[a-zA-Z_]+\b|\b[a-zA-Z_]+\b)?'
     results = []

@@ -21,7 +21,9 @@ STOP_WORDS = {
     "up", "very", "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", 
     "why", "with", "would", "you", "your", "yours", "yourself", "yourselves",
     "please", "explain", "describe", "define", "tell", "cite", "exact", "explicitly",
-    "provided", "document", "documents", "excerpt", "excerpts", "page", "pages"
+    "provided", "document", "documents", "excerpt", "excerpts", "page", "pages",
+    "key", "highlight", "highlighted", "highlights", "highlighting", "mention", "mentioned",
+    "action", "item", "items"
 }
 
 NUMBER_WORDS = {
@@ -83,13 +85,30 @@ def extract_query_keywords(query: str) -> List[str]:
     return list(dict.fromkeys(t for t in tokens if len(t) >= 2 and t not in STOP_WORDS))
 
 
+def stem_word(w: str) -> set:
+    forms = {w}
+    if w.endswith("ing") and len(w) > 5:
+        forms.add(w[:-3])
+        forms.add(w[:-3] + "e")
+    elif w.endswith("ed") and len(w) > 4:
+        forms.add(w[:-2])
+        forms.add(w[:-1])
+    elif w.endswith("es") and len(w) > 4:
+        forms.add(w[:-2])
+        forms.add(w[:-1])
+    elif w.endswith("s") and len(w) > 3 and not w.endswith(("ss", "us", "is")):
+        forms.add(w[:-1])
+    return forms
+
 def keyword_present(keyword: str, text: str) -> bool:
-    """Match whole words, including ordinary singular/plural forms."""
-    forms = {keyword}
-    if len(keyword) > 4 and keyword.endswith("s") and not keyword.endswith(("ss", "us", "is")):
-        forms.add(keyword[:-1])
-    elif len(keyword) > 3:
-        forms.add(keyword + "s")
+    """Match whole words, including singular/plural, past tense (-ed), and progressive (-ing) forms."""
+    forms = set()
+    for f in stem_word(keyword.lower()):
+        forms.add(f)
+        if len(f) > 3:
+            forms.add(f + "s")
+            forms.add(f + "ed")
+            forms.add(f + "ing")
     return any(re.search(r'\b' + re.escape(form) + r'\b', text, re.I) for form in forms)
 
 def evaluate_heuristic_entailment(
@@ -241,7 +260,9 @@ def evaluate_heuristic_entailment(
     # Questions are not factual assertions: negation in a source is not a contradiction of a question.
 
     # 3. Proposition alignment probability
-    has_answer_target = has_numerical_target if is_quantitative else (lexical_recall >= 0.40)
+    has_answer_target = has_numerical_target if is_quantitative else (
+        lexical_recall >= 0.40 or (top_dense >= 0.65 and lexical_recall >= 0.20)
+    )
     
     if top_dense >= SIMILARITY_THRESHOLD and has_answer_target:
         # Genuine entailment: Evidence provides the facts needed to answer
