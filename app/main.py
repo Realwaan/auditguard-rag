@@ -658,6 +658,9 @@ Either party may terminate this agreement without cause by providing at least 30
                 if v_node and v_node.image_url:
                     c["image_url"] = v_node.image_url
                     c["has_visual"] = True
+        else:
+            c["ast_node_id"] = f"{sample_doc_id}_para_1"
+            c["materialized_path"] = f"root/sec_2/{sample_doc_id}_para_1"
 
     DOCUMENT_ASTS[sample_doc_id] = ast
     ACTIVE_CLASSIFICATION = classification

@@ -69,3 +69,12 @@ def test_citation_verification_detects_unsupported_claims():
     audit_invalid = verify_citations_grounding(hallucinated_answer, chunks)
     assert audit_invalid["all_supported"] is False
     assert audit_invalid["unsupported_count"] >= 1
+
+def test_sanitize_citations_removes_invalid_and_out_of_range():
+    from app.generator import sanitize_citations
+    text = "Uptime is 99.9% [1], penalty is 15% [2], invalid zero is [0], out of range is [99]."
+    clean = sanitize_citations(text, max_chunk=2)
+    assert "[1]" in clean
+    assert "[2]" in clean
+    assert "[0]" not in clean
+    assert "[99]" not in clean

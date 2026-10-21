@@ -15,10 +15,16 @@ def test_retriever_deduplicates_parents_without_dropping_top_k():
         {"child_text": "Sentence 1 of paragraph B", "parent_text": "Paragraph B full text"},
         {"child_text": "Sentence 1 of paragraph C", "parent_text": "Paragraph C full text"},
     ]
-    # Synthetic embeddings matrix with 5 rows matching 384 dimensions
-    embeddings = np.random.randn(5, 384).astype(np.float32)
-    # Normalize
-    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    from app.embeddings import embed_query
+
+    q_vec = embed_query("sentence")
+    # Set Paragraph A chunks to rank at the very top (slots 1, 2, 3)
+    embeddings = np.zeros((5, 384), dtype=np.float32)
+    embeddings[0] = q_vec
+    embeddings[1] = q_vec
+    embeddings[2] = q_vec
+    embeddings[3] = q_vec * 0.8
+    embeddings[4] = q_vec * 0.5
 
     retriever = HybridRetriever(chunks, embeddings)
     

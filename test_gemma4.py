@@ -1,4 +1,10 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Ensure local .env is loaded when run directly or through pytest
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from google import genai
 from google.genai import types
 

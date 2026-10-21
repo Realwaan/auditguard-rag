@@ -14,6 +14,13 @@ class HybridRetriever:
         self.lance_store = lance_store
         self.doc_id = doc_id
         
+        # Inverted index for O(1) AST node lookup during LanceDB fusion
+        self.node_id_to_indices: Dict[str, List[int]] = {}
+        for c_idx, c in enumerate(chunks):
+            nid = c.get("ast_node_id")
+            if nid:
+                self.node_id_to_indices.setdefault(nid, []).append(c_idx)
+
         # Tokenize child sentences for BM25
         if not chunks:
             self.bm25 = None
@@ -53,8 +60,8 @@ class HybridRetriever:
                 lance_hits = self.lance_store.search(self.doc_id, q_vec, top_k=top_k * 2)
                 for l_rank, hit in enumerate(lance_hits):
                     hit_id = hit.get("id")
-                    for c_idx, c in enumerate(self.chunks):
-                        if c.get("ast_node_id") == hit_id:
+                    if hit_id in self.node_id_to_indices:
+                        for c_idx in self.node_id_to_indices[hit_id]:
                             rrf_map[c_idx] = rrf_map.get(c_idx, 0.0) + (1.0 / (k_rrf + l_rank))
             except Exception:
                 pass

@@ -39,12 +39,12 @@ USER QUESTION:
 REMINDER: Answer strictly from the excerpts above. Cite [1], [2] for every claim. If unverified, refuse to guess."""
 
 def sanitize_citations(text: str, max_chunk: int) -> str:
-    """Clamps or strips citations referencing non-existent chunks (e.g. [5] when only 2 chunks exist)."""
+    """Clamps or strips citations referencing non-existent chunks (e.g. [5] when only 2 chunks exist, or invalid [0])."""
     if max_chunk <= 0:
-        return text
+        return re.sub(r'\[\d+\]', '', text).strip()
     def _replace(m):
         val = int(m.group(1))
-        if val > max_chunk:
+        if val > max_chunk or val <= 0:
             return ""
         return m.group(0)
     return re.sub(r'\[(\d+)\]', _replace, text).strip()
