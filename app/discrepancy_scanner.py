@@ -9,7 +9,7 @@ import json
 import re
 from typing import List, Dict, Any, Optional
 from app.ast_builder import DocumentAST, ASTNodeType, ASTNode
-from app.llm import get_openai_client, get_genai_client, is_llm_configured
+from app.llm import get_openai_client, get_genai_client, is_llm_configured, has_valid_openai_endpoint
 from app.config import LLM_MODEL, USE_GOOGLE_GENAI, get_active_gemma_model
 
 GROWTH_PATTERN = re.compile(
@@ -148,15 +148,25 @@ def detect_heuristic_discrepancy(text: str, visual_text: str) -> Optional[Dict[s
 def audit_cross_modal_pair(
     p_node: ASTNode,
     v_node: ASTNode,
-    use_llm: bool = True
+    use_llm: bool = False
 ) -> Dict[str, Any]:
     """
     Analyzes a linked Text Paragraph and Visual Node pair for consistency.
     Combines deterministic numerical/table verification with optional LLM audit.
     """
     heuristic = detect_heuristic_discrepancy(p_node.text, v_node.text)
+    if heuristic:
+        return {
+            "paragraph_id": p_node.id,
+            "visual_id": v_node.id,
+            "page": p_node.page,
+            "image_url": v_node.image_url,
+            **heuristic
+        }
 
-    if use_llm and is_llm_configured():
+    has_substantive_visual_text = len(v_node.text.strip()) > len(v_node.title.strip()) + 10
+
+    if use_llm and has_substantive_visual_text and is_llm_configured():
         system_prompt = """You are AuditGuard Cross-Modal Compliance Auditor.
 Your job is to compare a text claim against a linked visual table or chart description.
 Determine if they ALIGN, PARTIALLY ALIGN (CAUTION), or CONTRADICT each other.
@@ -191,7 +201,7 @@ Audit the claim against the visual data and output JSON."""
                 except Exception:
                     raw = ""
 
-        if not raw:
+        if not raw and has_valid_openai_endpoint():
             try:
                 client = get_openai_client()
                 response = client.chat.completions.create(
@@ -223,17 +233,6 @@ Audit the claim against the visual data and output JSON."""
                 except Exception:
                     pass
 
-    if heuristic:
-        return {
-            "paragraph_id": p_node.id,
-            "visual_id": v_node.id,
-            "page": p_node.page,
-            "image_url": v_node.image_url,
-            **heuristic
-        }
-
-    # Check if the visual node actually had substantive text/numbers to compare
-    has_substantive_visual_text = len(v_node.text.strip()) > len(v_node.title.strip()) + 10
     aligned_conf = 0.90 if has_substantive_visual_text else 0.65
 
     return {
@@ -250,7 +249,7 @@ Audit the claim against the visual data and output JSON."""
     }
 
 
-def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = True) -> Dict[str, Any]:
+def scan_ast_for_discrepancies(ast: DocumentAST, use_llm: bool = False) -> Dict[str, Any]:
     """
     Full AST Discrepancy Scan:
     Audits every cross-modal sibling link between prose paragraphs and visuals in the document.

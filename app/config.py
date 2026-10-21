@@ -8,13 +8,18 @@ load_dotenv(BASE_DIR / ".env")
 load_dotenv(BASE_DIR.parent / ".env")
 
 # ALMA Gemma 4 Inference Server
+_PLACEHOLDER_KEYS = {"", "local-or-alma-key", "alma-hackathon-token", "REPLACE_ON_HACKATHON_DAY", "YOUR_API_KEY_HERE", "YOUR_GOOGLE_AI_STUDIO_API_KEY"}
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma-4")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "local-or-alma-key")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "local-or-alma-key").strip()
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "15.0"))
 
 # Google GenAI Native Gemma 4 (31B / 26B MoE)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Accepts GEMINI_API_KEY, GOOGLE_API_KEY, or falls back to LLM_API_KEY if a real key was placed there
+_raw_gemini_key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+GEMINI_API_KEY = _raw_gemini_key if _raw_gemini_key not in _PLACEHOLDER_KEYS else (
+    LLM_API_KEY if LLM_API_KEY not in _PLACEHOLDER_KEYS else ""
+)
 USE_GOOGLE_GENAI = os.getenv("USE_GOOGLE_GENAI", "true").lower() in ("true", "1", "yes")
 GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-4-26b-a4b-it")
 

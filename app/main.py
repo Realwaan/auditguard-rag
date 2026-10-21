@@ -30,6 +30,7 @@ from app.generator import (
 )
 from app.llm import call_plain_gemma_with_telemetry, is_llm_configured
 from app.audit_scanner import run_compliance_audit
+from app.exporter import build_pdf_bytes, build_docx_bytes, build_csv_string
 
 app = FastAPI(title="AuditGuard RAG • Hierarchical Multimodal Tree-RAG", version="2.0.0")
 
@@ -59,7 +60,7 @@ ACTIVE_CLASSIFICATION: dict = {
 
 class QueryRequest(BaseModel):
     query: str
-    include_baseline: bool = True
+    include_baseline: bool = False
 
 
 class ExportReportRequest(BaseModel):
@@ -293,6 +294,10 @@ async def ask_question(payload: QueryRequest):
                 eval_result = escalated_eval
 
     # 4. Check for Defense Refusal
+    total_ast_nodes = len(ast.nodes) if ast else doc_entry.get("total_ast_nodes", 0)
+    cross_modal_links = len(ast.get_cross_modal_links()) if ast else doc_entry.get("cross_modal_links", 0)
+    indexing_duration_ms = doc_entry.get("indexing_duration_ms", 0.0)
+
     if eval_result["status"] == "REFUSE":
         plain_baseline = ""
         baseline_tokens = 0
@@ -300,6 +305,7 @@ async def ask_question(payload: QueryRequest):
             plain_baseline, base_meta = await asyncio.to_thread(call_plain_gemma_with_telemetry, query)
             baseline_tokens = base_meta.get("baseline_tokens", 0)
 
+        total_ms = round((time.perf_counter() - t_total_start) * 1000, 2)
         return {
             "query": query,
             "status": "REFUSE",
@@ -309,12 +315,24 @@ async def ask_question(payload: QueryRequest):
             "baseline": plain_baseline,
             "classification": classification,
             "retrieval_ms": retrieval_ms,
-            "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
+            "total_ms": total_ms,
             "estimated_tokens": baseline_tokens,
+            "token_telemetry": {
+                "grounded_prompt_tokens": 0,
+                "grounded_completion_tokens": 0,
+                "grounded_total_tokens": 0,
+                "baseline_tokens": baseline_tokens,
+                "total_tokens": baseline_tokens,
+                "generation_mode": "refusal_gatekeeper",
+                "model_used": get_active_gemma_model(),
+                "total_ast_nodes": total_ast_nodes,
+                "cross_modal_links": cross_modal_links,
+                "indexing_duration_ms": indexing_duration_ms,
+            },
             "generation_mode": "refusal_gatekeeper",
         }
 
-    # 5. Synthesize Grounded Answer & Hallucination Baseline in PARALLEL
+    # 5. Synthesize Grounded Answer
     persona = classification.get("prompt_addon", "")
 
     async def _fetch_grounded():
@@ -333,6 +351,7 @@ async def ask_question(payload: QueryRequest):
     eval_result = verify_generated_answer(grounded_answer, retrieved, eval_result)
     final_status = "REFUSE" if eval_result["status"] == "REFUSE" else "SUCCESS"
     total_tokens = int(gen_meta.get("total_tokens", 0) + base_meta.get("baseline_tokens", 0))
+    total_ms = round((time.perf_counter() - t_total_start) * 1000, 2)
 
     return {
         "query": query,
@@ -343,7 +362,7 @@ async def ask_question(payload: QueryRequest):
         "baseline": plain_baseline,
         "classification": classification,
         "retrieval_ms": retrieval_ms,
-        "total_ms": round((time.perf_counter() - t_total_start) * 1000, 2),
+        "total_ms": total_ms,
         "estimated_tokens": total_tokens,
         "token_telemetry": {
             "grounded_prompt_tokens": gen_meta.get("prompt_tokens", 0),
@@ -353,6 +372,9 @@ async def ask_question(payload: QueryRequest):
             "total_tokens": total_tokens,
             "generation_mode": gen_meta.get("generation_mode", "unknown"),
             "model_used": gen_meta.get("model_used", ""),
+            "total_ast_nodes": total_ast_nodes,
+            "cross_modal_links": cross_modal_links,
+            "indexing_duration_ms": indexing_duration_ms,
         },
         "generation_mode": gen_meta.get("generation_mode", "unknown"),
     }
@@ -402,7 +424,8 @@ async def ask_stream(query: str):
 @app.post("/export-report")
 async def export_report(payload: ExportReportRequest):
     """
-    Exports an audited compliance finding as a downloadable Markdown (.md) or JSON (.json) report.
+    Exports an audited compliance finding as a downloadable PDF (.pdf), Word (.docx),
+    CSV (.csv), Markdown (.md), or JSON (.json) report.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -410,8 +433,9 @@ async def export_report(payload: ExportReportRequest):
     doc_type = payload.classification.get("type", "GENERAL_SPECIFICATION")
     eval_badge = payload.evaluation.get("badge", "Verified")
     confidence = payload.evaluation.get("confidence", 0.0)
+    fmt = payload.format.lower().strip()
 
-    if payload.format.lower() == "json":
+    if fmt == "json":
         report_obj = {
             "generated_at": timestamp,
             "engine": "AuditGuard Tree-RAG v2.0",
@@ -427,6 +451,51 @@ async def export_report(payload: ExportReportRequest):
             content=json.dumps(report_obj, indent=2),
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="audit_trail_{file_timestamp}.json"'}
+        )
+
+    if fmt == "pdf":
+        pdf_bytes = build_pdf_bytes(
+            title="AuditGuard Verification Report",
+            timestamp=timestamp,
+            doc_label=doc_label,
+            confidence=confidence,
+            query=payload.query,
+            answer=payload.answer,
+            sources=payload.sources,
+        )
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="audit_report_{file_timestamp}.pdf"'}
+        )
+
+    if fmt in ("docx", "word", "doc"):
+        docx_bytes = build_docx_bytes(
+            title="AuditGuard Verification Report",
+            timestamp=timestamp,
+            doc_label=doc_label,
+            confidence=confidence,
+            query=payload.query,
+            answer=payload.answer,
+            sources=payload.sources,
+        )
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="audit_report_{file_timestamp}.docx"'}
+        )
+
+    if fmt == "csv":
+        csv_text = build_csv_string(
+            timestamp=timestamp,
+            query=payload.query,
+            answer=payload.answer,
+            sources=payload.sources,
+        )
+        return Response(
+            content=csv_text.encode("utf-8-sig"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="audit_report_{file_timestamp}.csv"'}
         )
 
     md_lines = [
@@ -496,13 +565,13 @@ def get_active_document_ast():
 
 @app.get("/api/discrepancies")
 @app.get("/api/ast/discrepancies")
-def get_active_discrepancies():
+async def get_active_discrepancies(use_llm: bool = False):
     """Runs automated Cross-Modal Contradiction Scanner across active AST."""
     if not ACTIVE_DOC_ID or ACTIVE_DOC_ID not in DOCUMENT_ASTS:
         raise HTTPException(status_code=400, detail="No document loaded. Please upload or load a document first.")
 
     ast = DOCUMENT_ASTS[ACTIVE_DOC_ID]
-    report = scan_ast_for_discrepancies(ast, use_llm=True)
+    report = await asyncio.to_thread(scan_ast_for_discrepancies, ast, use_llm)
     report["filename"] = DOCUMENT_VAULT.get(ACTIVE_DOC_ID, {}).get("filename", "Current Document")
     return report
 

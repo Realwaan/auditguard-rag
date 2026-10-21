@@ -113,10 +113,10 @@ def test_compliance_audit_api_endpoint():
     assert "+ " in gaps[0]["redline_diff"]
 
 
-def test_export_report_markdown_and_json():
+def test_export_report_all_formats():
     payload = {
         "query": "What is the penalty credit?",
-        "answer": "A 15% billing credit applies [1].",
+        "answer": "A 15% billing credit applies [1].\n\n| Metric | Claim | Actual |\n| --- | --- | --- |\n| Uptime | 99.9% | 98.2% |",
         "sources": [{"citation_id": 1, "filename": "sample.txt", "page": 1, "dense_score": 0.85, "parent_text": "15% billing credit"}],
         "classification": {"label": "Legal Agreement / SLA", "type": "LEGAL_CONTRACT"},
         "evaluation": {"badge": "🛡️ GROUNDED", "confidence": 85.0},
@@ -125,7 +125,7 @@ def test_export_report_markdown_and_json():
     }
     md_res = client.post("/export-report", json=payload)
     assert md_res.status_code == 200
-    assert "AuditGuard RAG" in md_res.text
+    assert "AuditGuard" in md_res.text
     assert "15% billing credit" in md_res.text
 
     payload["format"] = "json"
@@ -134,6 +134,24 @@ def test_export_report_markdown_and_json():
     parsed = json_res.json()
     assert parsed["query"] == "What is the penalty credit?"
     assert len(parsed["sources"]) == 1
+
+    payload["format"] = "pdf"
+    pdf_res = client.post("/export-report", json=payload)
+    assert pdf_res.status_code == 200
+    assert pdf_res.headers["content-type"] == "application/pdf"
+    assert pdf_res.content.startswith(b"%PDF-1.4")
+
+    payload["format"] = "docx"
+    docx_res = client.post("/export-report", json=payload)
+    assert docx_res.status_code == 200
+    assert "officedocument.wordprocessingml.document" in docx_res.headers["content-type"]
+    assert docx_res.content.startswith(b"PK")
+
+    payload["format"] = "csv"
+    csv_res = client.post("/export-report", json=payload)
+    assert csv_res.status_code == 200
+    assert "text/csv" in csv_res.headers["content-type"]
+    assert "What is the penalty credit?" in csv_res.text
 
 
 def test_model_toggle_updates_health():
@@ -159,3 +177,43 @@ def test_ask_and_query_endpoints_benchmark_fields():
     assert "status" in data
     assert "evaluation" in data
     assert "token_telemetry" in data
+    assert "total_ast_nodes" in data["token_telemetry"]
+    assert "cross_modal_links" in data["token_telemetry"]
+
+
+def test_glassmorphism_ui_structure():
+    res = client.get("/")
+    assert res.status_code == 200
+    html = res.text
+    # Ensure comparison RAG baseline card and removed overkill buttons are absent
+    assert 'id="baseline-card"' not in html
+    assert 'id="compare-toggle"' not in html
+    assert 'id="btn-load-sample"' not in html
+    assert 'id="btn-open-ast"' not in html
+    assert 'id="btn-open-discrepancy"' not in html
+    assert 'id="btn-run-audit"' not in html
+    assert "Hierarchical Multimodal" not in html
+    assert "Document Vault" not in html
+    assert "<span>Documents</span>" in html
+    # Ensure Dynamic Island (attach left, input center, voice + submit right) is present
+    assert 'id="dynamic-island"' in html
+    assert 'id="btn-attach-doc"' in html
+    assert 'id="btn-voice-dictate"' in html
+    assert 'id="btn-submit"' in html
+    # Ensure Collapsible Left Sidebar tracking conversations is present
+    assert 'id="left-sidebar"' in html
+    assert 'id="conversation-list"' in html
+    # Ensure randomized landing hero & floating spheres exist
+    assert 'id="landing-hero"' in html
+    assert 'id="random-greeting-title"' in html
+    assert 'floating-sphere' in html
+    # Ensure Top-Right Expandable/Resizable Performance Notification & Light/Dark choices exist
+    assert 'id="perf-telemetry-popover"' in html
+    assert 'id="perf-notif-toggle-btn"' in html
+    assert 'id="theme-btn-light"' in html
+    assert 'id="theme-btn-dark"' in html
+    # Ensure New Chat top section, delete confirmation dialog, visual chart slot, and dark blue light-mode palette exist
+    assert 'id="btn-new-chat"' in html
+    assert 'id="delete-conv-dialog"' in html
+    assert 'id="visual-chart-container"' in html
+    assert "--brand-cyan-light: #1d4ed8;" in html

@@ -18,6 +18,9 @@ def has_valid_gemini_key() -> bool:
 
 
 def has_valid_openai_endpoint() -> bool:
+    # When Google GenAI is explicitly enabled and has a valid key, do not fall back to default local Ollama URL
+    if cfg.USE_GOOGLE_GENAI and has_valid_gemini_key():
+        return False
     base = (cfg.LLM_BASE_URL or "").strip().rstrip("/")
     key = (cfg.LLM_API_KEY or "").strip()
     if not base or "REPLACE_WITH_ALMA_URL" in base:
@@ -35,7 +38,11 @@ def is_llm_configured() -> bool:
 
 def get_genai_client():
     if has_valid_gemini_key():
-        return genai.Client(api_key=cfg.GEMINI_API_KEY)
+        timeout_ms = int(max(3.0, cfg.LLM_TIMEOUT_SECONDS) * 1000)
+        return genai.Client(
+            api_key=cfg.GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=timeout_ms),
+        )
     return None
 
 
