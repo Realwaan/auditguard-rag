@@ -122,3 +122,10 @@ def test_build_document_ast_pipeline():
     assert dict_repr["doc_id"] == "demo_sop"
     assert dict_repr["total_nodes"] >= 4
     assert len(ast.get_leaves()) >= 2
+
+    # Verify RAPTOR thematic section summary edge
+    sec_nodes = [n for n in ast.nodes.values() if n.type == ASTNodeType.SECTION]
+    assert len(sec_nodes) >= 1
+    summarized_sec = [s for s in sec_nodes if "thematic_summary" in s.metadata]
+    assert len(summarized_sec) >= 1
+    assert len(summarized_sec[0].metadata["thematic_summary"]) > 0

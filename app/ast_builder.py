@@ -395,6 +395,27 @@ def build_document_ast(
                 ast.add_node(para_node, parent_id=current_section_id)
                 para_counter += 1
 
+    # 1.5 Synthesize Thematic Section Summaries (RAPTOR-Style AST Layer)
+    for node in list(ast.nodes.values()):
+        if node.type == ASTNodeType.SECTION:
+            child_paras = [
+                ast.nodes[cid] for cid in node.children_ids 
+                if cid in ast.nodes and ast.nodes[cid].type == ASTNodeType.PARAGRAPH
+            ]
+            if child_paras:
+                lead_sentences = []
+                for cp in child_paras[:4]:
+                    clean = cp.text.split(". ")[0].strip()
+                    if clean and len(clean) > 20 and not clean.startswith("Table") and not clean.startswith("Figure"):
+                        lead_sentences.append(clean)
+                if lead_sentences:
+                    summary = "; ".join(lead_sentences)
+                    if not summary.endswith("."):
+                        summary += "."
+                    node.metadata["thematic_summary"] = summary
+                    node.metadata["summary_path"] = f"{node.materialized_path}/thematic_summary"
+                    node.text = f"{node.title}: {summary}"
+
     # 2. Extract visual crops if PDF bytes are available
     if pdf_bytes:
         visual_nodes = extract_halo_crops(doc_id, pdf_bytes)

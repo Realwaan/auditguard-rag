@@ -523,18 +523,49 @@ function loadComplianceAudit() {
             container.innerHTML = "";
             data.checklist.forEach(item => {
                 const row = document.createElement("div");
-                row.className = "p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs";
+                row.className = "p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2";
+                
+                let remediationHtml = "";
+                if (item.status === 'GAP' && item.remediation_clause) {
+                    const diffText = (item.redline_diff || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                    const safeClause = (item.remediation_clause || "").replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                    remediationHtml = `
+                    <div class="mt-2 pt-2 border-t border-slate-800/80">
+                      <details class="group cursor-pointer">
+                        <summary class="text-[11px] font-semibold text-amber-400 hover:text-amber-300 flex items-center justify-between">
+                          <span>🛠️ Automated Enterprise Remediation Diff (Robin/Ironclad Edge)</span>
+                          <span class="text-[10px] text-slate-500 group-open:rotate-180 transition-transform">▼</span>
+                        </summary>
+                        <div class="mt-2 space-y-2 bg-slate-900/90 p-2.5 rounded-lg border border-slate-800 text-[11px]">
+                          <p class="text-slate-300"><strong class="text-slate-100 font-semibold">Legal Rationale:</strong> ${item.rationale || 'Mandatory compliance control.'}</p>
+                          <div class="p-2 rounded bg-slate-950 font-mono text-[10px] text-emerald-400 overflow-x-auto border border-emerald-950">
+                            <pre class="whitespace-pre-wrap">${diffText}</pre>
+                          </div>
+                          <div class="flex items-center justify-between pt-1">
+                            <span class="text-[10px] text-slate-400 italic">Pre-approved enterprise fallback clause</span>
+                            <button onclick="navigator.clipboard.writeText('${safeClause}'); this.innerText='✅ Copied!'; setTimeout(()=>this.innerText='📋 Copy Approved Clause', 2000)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-[10px] transition">
+                              📋 Copy Approved Clause
+                            </button>
+                          </div>
+                        </div>
+                      </details>
+                    </div>`;
+                }
+
                 row.innerHTML = `
-                <div class="flex items-center gap-2.5">
-                  <span class="text-base">${item.status === 'PASS' ? '✅' : '⚠️'}</span>
-                  <div>
-                    <p class="font-bold text-white">${item.control}</p>
-                    <p class="text-[11px] text-slate-400">${item.finding}</p>
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2.5">
+                    <span class="text-base">${item.status === 'PASS' ? '✅' : '⚠️'}</span>
+                    <div>
+                      <p class="font-bold text-white">${item.control || item.title}</p>
+                      <p class="text-[11px] text-slate-400">${item.finding}</p>
+                    </div>
                   </div>
+                  <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${item.status === 'PASS' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'}">
+                    ${item.status} (${Math.round(item.confidence * 100)}%)
+                  </span>
                 </div>
-                <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${item.status === 'PASS' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'}">
-                  ${item.status} (${Math.round(item.confidence * 100)}%)
-                </span>`;
+                ${remediationHtml}`;
                 container.appendChild(row);
             });
         })

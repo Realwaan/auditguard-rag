@@ -51,3 +51,31 @@ def test_compliance_audit_scanner():
     assert "checklist" in report
     assert len(report["checklist"]) == 7
     assert "verdict" in report
+    assert report["remediation_playbook_available"] is True
+    assert "remediation_count" in report
+    
+    # Verify Robin/Ironclad automated redline diff integration
+    gap_items = [item for item in report["checklist"] if item["status"] == "GAP"]
+    assert len(gap_items) > 0
+    first_gap = gap_items[0]
+    assert first_gap["remediation_clause"] is not None
+    assert first_gap["redline_diff"] is not None
+    assert "+ " in first_gap["redline_diff"]
+    assert "action_plan" in first_gap
+
+def test_nli_entailment_evaluator():
+    from app.evaluator import evaluate_relevance
+    # Entailed chunk
+    grounded_chunks = [{"dense_score": 0.85, "child_text": "Clause 1 verified."}]
+    res = evaluate_relevance(grounded_chunks)
+    assert res["status"] == "SYNTHESIZE"
+    assert res["nli_verdict"] == "ENTAILED"
+    assert res["nli_entailment_prob"] >= 0.80
+    assert "ENTAILED" in res["badge"]
+
+    # Refusal chunk
+    ungrounded_chunks = [{"dense_score": 0.20, "child_text": "Unrelated topic."}]
+    ref_res = evaluate_relevance(ungrounded_chunks)
+    assert ref_res["status"] == "REFUSE"
+    assert "NEUTRAL" in ref_res["nli_verdict"]
+    assert "OUT-OF-BOUNDS" in ref_res["badge"]

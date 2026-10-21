@@ -1,4 +1,5 @@
-from typing import List, Dict, Any
+import difflib
+from typing import List, Dict, Any, Optional
 from app.retriever import HybridRetriever
 from app.evaluator import evaluate_relevance
 
@@ -54,10 +55,64 @@ DEFAULT_COMPLIANCE_CHECKS = [
     }
 ]
 
+COMPLIANCE_REMEDIATION_PLAYBOOK: Dict[str, Dict[str, str]] = {
+    "SLA-01": {
+        "standard_clause": "2.1 Minimum Service Uptime: The Service Provider guarantees a monthly service availability of not less than 99.9% during client business hours, excluding scheduled maintenance.",
+        "rationale": "Defines an unambiguous mathematical threshold for availability breach enforcement.",
+        "action_required": "Insert formal uptime availability baseline into the Service Level Agreement section."
+    },
+    "PEN-02": {
+        "standard_clause": "2.2 Penalty Credit: In the event monthly availability drops below 99.5%, client shall be entitled to an immediate 15% billing credit applied to the subsequent invoice cycle.",
+        "rationale": "Enforces commercial accountability and eliminates vendor breach impunity.",
+        "action_required": "Add contractual billing discount trigger upon SLA failure."
+    },
+    "SEC-03": {
+        "standard_clause": "3.1 Zero-Trust & Hardware MFA: Remote contractors must access enterprise systems exclusively via hardware-enforced FIDO2/MFA and enterprise SSO. Storing credentials on personal local drives is strictly prohibited.",
+        "rationale": "Satisfies ISO 27001 / SOC 2 access control and credential leakage requirements.",
+        "action_required": "Mandate hardware tokens and ban local credential persistence."
+    },
+    "INC-04": {
+        "standard_clause": "3.2 Incident Escalation: Any suspected unauthorized data access must be formally logged within 15 minutes of occurrence and written notice served to the Client Security Officer within 1 hour.",
+        "rationale": "Establishes tight breach containment and regulatory disclosure windows.",
+        "action_required": "Bind vendor to 15-minute logging and 1-hour executive notification."
+    },
+    "FIN-05": {
+        "standard_clause": "4.1 Dual Wire Authorization: All financial disbursements or wire transactions exceeding $50,000 USD require dual written authorization from the Chief Financial Officer (CFO) and Managing Director.",
+        "rationale": "Prevents business email compromise (BEC) fraud and unauthorized treasury transfers.",
+        "action_required": "Establish dual executive signature barrier on high-value wires."
+    },
+    "BCP-06": {
+        "standard_clause": "5.1 Business Continuity & RTO: In the event of primary infrastructure failure, failover to secondary hot-standby systems must achieve a Recovery Time Objective (RTO) of under 2 hours.",
+        "rationale": "Guarantees business continuity and caps catastrophic disaster downtime.",
+        "action_required": "Incorporate explicit RTO ceiling in Disaster Recovery addendum."
+    },
+    "ESG-07": {
+        "standard_clause": "6.1 Environmental Reporting: Vendor shall submit quarterly greenhouse gas (GHG) emission assessments and maintain certified carbon offsets for all cloud compute resources.",
+        "rationale": "Complies with Scope 3 supply-chain ESG emissions disclosure directives.",
+        "action_required": "Attach quarterly sustainability disclosure and offset commitment."
+    }
+}
+
+def generate_redline_diff(original_text: str, target_clause: str, control_id: str) -> str:
+    """Generates a clean unified git-style diff showing the proposed remediation insertion."""
+    from_lines = [f"{original_text}\n"] if original_text and original_text.strip() else []
+    to_lines = [
+        f"@@ -0,0 +1,2 @@ # [REMEDIATION INSERTION - {control_id}]\n",
+        f"+ {target_clause}\n"
+    ]
+    diff = difflib.unified_diff(
+        from_lines,
+        to_lines,
+        fromfile="Active Document (Current)",
+        tofile=f"Compliance Standard ({control_id})"
+    )
+    return "".join(diff)
+
 def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
     """
     Executes an automated multi-point pre-flight compliance audit across the active document.
     Runs in under 40 milliseconds using in-memory hybrid search.
+    Enriched with automated redline remediation diffs and playbooks.
     """
     results = []
     passed_count = 0
@@ -66,6 +121,7 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
     for check in DEFAULT_COMPLIANCE_CHECKS:
         retrieved = retriever.retrieve(check["query"], top_k=2)
         eval_res = evaluate_relevance(retrieved)
+        remediation = COMPLIANCE_REMEDIATION_PLAYBOOK.get(check["id"], {})
 
         if eval_res["status"] == "SYNTHESIZE":
             best_chunk = retrieved[0]
@@ -78,6 +134,7 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
             passed_count += 1
             results.append({
                 "id": check["id"],
+                "control": check["title"],
                 "category": check["category"],
                 "title": check["title"],
                 "criticality": check["criticality"],
@@ -89,12 +146,22 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "page": best_chunk.get("page", 1),
                 "image_url": best_chunk.get("image_url", ""),
                 "citation_id": best_chunk.get("citation_id", 1),
-                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence."
+                "finding": f"Verified in Section/Page {best_chunk.get('page', 1)} with {eval_res['confidence']}% confidence.",
+                "remediation_clause": "Compliant with enterprise standard. No remediation required.",
+                "redline_diff": None,
+                "action_plan": "Verified active in document.",
+                "rationale": remediation.get("rationale", "Meets compliance requirements.")
             })
         else:
             gaps_count += 1
+            std_clause = remediation.get("standard_clause", "Standard enterprise clause required.")
+            action = remediation.get("action_required", "Remediation insertion required.")
+            rationale = remediation.get("rationale", "Mandatory compliance clause.")
+            redline = generate_redline_diff("", std_clause, check["id"])
+
             results.append({
                 "id": check["id"],
+                "control": check["title"],
                 "category": check["category"],
                 "title": check["title"],
                 "criticality": check["criticality"],
@@ -106,7 +173,11 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
                 "page": None,
                 "image_url": "",
                 "citation_id": None,
-                "finding": "HIGH AUDIT RISK: Required compliance clause is absent from document."
+                "finding": f"HIGH AUDIT RISK: {action}",
+                "remediation_clause": std_clause,
+                "redline_diff": redline,
+                "action_plan": action,
+                "rationale": rationale
             })
 
     total_checks = len(DEFAULT_COMPLIANCE_CHECKS)
@@ -125,9 +196,13 @@ def run_compliance_audit(retriever: HybridRetriever) -> Dict[str, Any]:
     return {
         "overall_score": score_pct,
         "total_checks": total_checks,
+        "total_controls": total_checks,
         "passed_count": passed_count,
         "gaps_count": gaps_count,
         "verdict": verdict,
         "verdict_color": verdict_color,
-        "checklist": results
+        "checklist": results,
+        "remediation_count": gaps_count,
+        "remediation_playbook_available": True
     }
+
