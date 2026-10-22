@@ -6,6 +6,7 @@ from pypdf import PdfReader
 import pypdfium2 as pdfium
 from app.config import PREVIEWS_DIR, DOCS_DIR
 from app.classifier import classify_document
+from app.pdf_lock import serialized_pdf
 
 
 def sanitize_doc_id(raw_id: str) -> str:
@@ -15,6 +16,7 @@ def sanitize_doc_id(raw_id: str) -> str:
     return cleaned or "document"
 
 
+@serialized_pdf
 def get_or_render_page_image(doc_prefix: str, page_num: int) -> Path | None:
     """
     On-demand single-page renderer for large documents (e.g. 300-page manuals).
@@ -58,27 +60,22 @@ def get_or_render_page_image(doc_prefix: str, page_num: int) -> Path | None:
     return None
 
 
+@serialized_pdf
 def render_page_previews(pdf_bytes: bytes, doc_prefix: str) -> Dict[int, str]:
     """
-    Smart Page Preview Renderer:
-    - Small documents (<= 10 pages): renders all upfront.
-    - Large enterprise documents (up to 300+ pages): saves the master PDF,
-      pre-renders the first 3 pages for instant UI thumbs, and routes the rest
-      to the on-demand /api/preview endpoint.
+    Save the PDF and render only the first preview. Other pages render on demand.
     """
     safe_prefix = sanitize_doc_id(doc_prefix)
     pdf_save_path = DOCS_DIR / f"{safe_prefix}.pdf"
-    try:
-        pdf_save_path.write_bytes(pdf_bytes)
-    except Exception as e:
-        print(f"Warning saving master PDF: {e}")
+    # Lazy previews/crops require the original PDF; don't publish broken citations.
+    pdf_save_path.write_bytes(pdf_bytes)
 
     page_map: Dict[int, str] = {}
     try:
         pdf = pdfium.PdfDocument(pdf_bytes)
         try:
             total_pages = len(pdf)
-            pages_to_prerender = total_pages if total_pages <= 10 else 3
+            pages_to_prerender = 1
 
             for idx in range(total_pages):
                 page_num = idx + 1
@@ -122,6 +119,7 @@ def clean_text_to_markdown(raw_text: str) -> str:
     return "\n".join(cleaned)
 
 
+@serialized_pdf
 def extract_pages_from_pdf(pdf_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
     """Extract page-level text and metadata from raw PDF bytes, normalized to structured Markdown."""
     pages = []

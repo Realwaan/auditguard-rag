@@ -1,15 +1,18 @@
 import numpy as np
+from threading import Lock
 from typing import List
 from app.config import DEFAULT_EMBED_MODEL
 
 _embedding_model = None
+_model_lock = Lock()
 
 def get_embedding_model():
     """Lazily load FastEmbed ONNX model."""
     global _embedding_model
-    if _embedding_model is None:
-        from fastembed import TextEmbedding
-        _embedding_model = TextEmbedding(model_name=DEFAULT_EMBED_MODEL)
+    with _model_lock:
+        if _embedding_model is None:
+            from fastembed import TextEmbedding
+            _embedding_model = TextEmbedding(model_name=DEFAULT_EMBED_MODEL)
     return _embedding_model
 
 def embed_texts(texts: List[str]) -> np.ndarray:

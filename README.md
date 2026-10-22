@@ -18,6 +18,56 @@ Enterprises and remote operations teams waste hundreds of hours cross-referencin
 
 ---
 
+## Attachment indexing and performance
+
+An attachment is ready when text extraction, document structure, child embeddings,
+and hybrid search are available. The additional paragraph/visual embeddings and
+LanceDB write run in a single background worker. Chat, audits, and citations use
+the ready document immediately. Graceful shutdown waits for that worker to finish.
+Failed background jobs are logged and exposed through `/vault`; reattaching retries
+them without rebuilding an otherwise valid search cache.
+
+The embedding model preloads during application startup, moving initialization out
+of the first attachment request. `/health` reports `embedding_preload_succeeded`
+and `embedding_preload_ms`. A preload failure is logged; later embedding requests
+can retry initialization.
+
+Processed documents are cached under `data/index/ingestion-cache/` as atomic NPZ
+files containing JSON metadata and numeric vectors (no pickle). Cache keys include
+file contents, PDF/text format, embedding model, and `PIPELINE_VERSION` in
+`app/indexing.py`. Bump that version when extraction, chunking, classification, or
+visual metadata changes. Cache reuse survives server restarts and filename changes;
+citations use the newly uploaded filename. Document IDs are opaque content-based
+identifiers: identical contents reuse a vault entry, while changed contents under
+the same filename receive a new entry. Invalid caches rebuild automatically.
+
+PDF attachments render only the first page preview. All figure/table detection and
+text links still run before readiness, but later page previews and visual crops
+render on demand and are saved for reuse. `/api/crop/{doc_id}/{node_id}` can restore
+the cached document tree to serve saved citation links after a restart. Keep the
+cached metadata and original PDFs to retain this behavior.
+
+`/upload`, `/load-sample`, and `/vault` expose `cache_hit`, `cache_warning`, and
+`stage_timings_ms` for cache lookup, extraction, previews, document-tree building,
+chunking, child embeddings, cache writes, and retriever setup.
+`indexing_duration_ms` now measures the complete search-preparation pipeline,
+including extraction and previews. `attachment_duration_ms` includes endpoint work
+after multipart parsing; neither measures browser-to-server transfer time.
+`background_indexing` separately reports status, errors, duration, and completed
+`leaf_embeddings_ms` / `database_write_ms`. A reused LanceDB table has no embedding
+or write timings because those stages were skipped.
+
+Regression checks:
+
+```powershell
+python -m pytest tests -q -p no:cacheprovider --basetemp data/index/test-run
+```
+
+In a local three-run benchmark on the bundled text SOP with a warm embedding model,
+median preparation fell from 414 ms for the previous synchronous pipeline to
+210 ms for search readiness; cached preparation took 10 ms. This excludes HTTP
+overhead and background work and is not an estimate for larger PDFs.
+
 ## 🏗️ Architecture: Cross-Linked Multimodal AST
 
 ```

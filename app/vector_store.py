@@ -8,6 +8,7 @@ and automatic cross-modal sibling hydration.
 from __future__ import annotations
 import json
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import numpy as np
@@ -43,10 +44,18 @@ class LanceVectorStore:
         safe_id = "".join(c if c.isalnum() else "_" for c in doc_id)
         return f"ast_{safe_id}"
 
+    def has_document(self, doc_id: str) -> bool:
+        try:
+            self.db.open_table(self._get_table_name(doc_id))
+            return True
+        except Exception:
+            return False
+
     def index_ast(
         self,
         ast: DocumentAST,
         embeddings_matrix: Optional[np.ndarray] = None,
+        timings: Optional[Dict[str, float]] = None,
     ) -> str:
         """
         Indexes all leaf nodes (paragraphs) and visual nodes into a LanceDB table.
@@ -61,9 +70,13 @@ class LanceVectorStore:
             return ""
 
         if embeddings_matrix is None or len(embeddings_matrix) != len(leaves):
+            started = time.perf_counter()
             leaf_texts = [f"{n.title}: {n.text}" if n.title else n.text for n in leaves]
             embeddings_matrix = embed_texts(leaf_texts)
+            if timings is not None:
+                timings["leaf_embeddings_ms"] = round((time.perf_counter() - started) * 1000, 2)
 
+        started = time.perf_counter()
         table_name = self._get_table_name(ast.doc_id)
         records = []
         for idx, node in enumerate(leaves):
@@ -85,6 +98,8 @@ class LanceVectorStore:
             })
 
         self.db.create_table(table_name, data=records, mode="overwrite")
+        if timings is not None:
+            timings["database_write_ms"] = round((time.perf_counter() - started) * 1000, 2)
         return table_name
 
     def search(

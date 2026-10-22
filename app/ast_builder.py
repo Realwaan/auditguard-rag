@@ -14,7 +14,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image, ImageDraw
 import pypdfium2 as pdfium
 
-from app.config import CROPS_DIR, PREVIEWS_DIR
+from app.config import CROPS_DIR, DOCS_DIR
+from app.pdf_lock import serialized_pdf
 
 
 class ASTNodeType(str, Enum):
@@ -226,10 +227,12 @@ def _locate_text_bbox_on_page(
     return None
 
 
+@serialized_pdf
 def extract_halo_crops(
     doc_id: str,
     pdf_bytes: bytes,
     detected_boxes_by_page: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    render_crops: bool = True,
 ) -> List[ASTNode]:
     """
     Collision-Bounded Halo Cropper:
@@ -262,7 +265,9 @@ def extract_halo_crops(
                     for obj in page.get_objects():
                         # PDF object type 3 corresponds to Image
                         if getattr(obj, "type", None) == 3:
-                            bbox = obj.get_pos()  # (left, bottom, right, top) in PDF coordinates
+                            # Newer PDFium helpers renamed get_pos() to get_bounds().
+                            get_bounds = getattr(obj, "get_bounds", None) or obj.get_pos
+                            bbox = get_bounds()  # (left, bottom, right, top) in PDF coordinates
                             if (bbox[2] - bbox[0] > 40) and (bbox[3] - bbox[1] > 40):
                                 img_idx += 1
                                 # Inspect nearby caption region (45pt below and above image)
@@ -330,24 +335,26 @@ def extract_halo_crops(
                 crop_y0 = max(0.0, y0 - halo_y)
                 crop_y1 = min(height_pt, y1 + halo_y)
 
-                if pil_page is None:
-                    pil_page = page.render(scale=2.0).to_pil()
-                img_w, img_h = pil_page.size
-
-                calc_x0 = int((crop_x0 / width_pt) * img_w)
-                calc_x1 = int((crop_x1 / width_pt) * img_w)
-                calc_y0 = int(((height_pt - crop_y1) / height_pt) * img_h)
-                calc_y1 = int(((height_pt - crop_y0) / height_pt) * img_h)
-
-                img_x0 = max(0, min(img_w - 2, min(calc_x0, calc_x1)))
-                img_x1 = max(img_x0 + 1, min(img_w, max(calc_x0, calc_x1)))
-                img_y0 = max(0, min(img_h - 2, min(calc_y0, calc_y1)))
-                img_y1 = max(img_y0 + 1, min(img_h, max(calc_y0, calc_y1)))
-
-                cropped_img = pil_page.crop((img_x0, img_y0, img_x1, img_y1))
                 crop_file_name = f"{vis_id}.webp"
-                crop_path = CROPS_DIR / crop_file_name
-                cropped_img.save(crop_path, "WEBP", quality=85)
+                if render_crops:
+                    if pil_page is None:
+                        pil_page = page.render(scale=2.0).to_pil()
+                    img_w, img_h = pil_page.size
+
+                    calc_x0 = int((crop_x0 / width_pt) * img_w)
+                    calc_x1 = int((crop_x1 / width_pt) * img_w)
+                    calc_y0 = int(((height_pt - crop_y1) / height_pt) * img_h)
+                    calc_y1 = int(((height_pt - crop_y0) / height_pt) * img_h)
+
+                    img_x0 = max(0, min(img_w - 2, min(calc_x0, calc_x1)))
+                    img_x1 = max(img_x0 + 1, min(img_w, max(calc_x0, calc_x1)))
+                    img_y0 = max(0, min(img_h - 2, min(calc_y0, calc_y1)))
+                    img_y1 = max(img_y0 + 1, min(img_h, max(calc_y0, calc_y1)))
+
+                    cropped_img = pil_page.crop((img_x0, img_y0, img_x1, img_y1))
+                    crop_file_name = f"{vis_id}.webp"
+                    crop_path = CROPS_DIR / crop_file_name
+                    cropped_img.save(crop_path, "WEBP", quality=85)
 
                 v_title = cand.get("title") or f"Visual Figure #{v_idx} [P{page_num}]"
                 v_text = cand.get("text") or v_title
@@ -361,7 +368,7 @@ def extract_halo_crops(
                     page=page_num,
                     materialized_path=f"root/visuals/{vis_id}",
                     bbox=(crop_x0, crop_y0, crop_x1, crop_y1),
-                    image_url=f"/static/crops/{crop_file_name}",
+                    image_url=(f"/static/crops/{crop_file_name}" if render_crops else f"/api/crop/{doc_id}/{vis_id}"),
                     visual_type=cand.get("visual_type", "figure"),
                     confidence=node_conf,
                 )
@@ -370,6 +377,45 @@ def extract_halo_crops(
         pdf.close()
 
     return visual_nodes
+
+
+@serialized_pdf
+def get_or_render_visual_crop(ast: DocumentAST, node: ASTNode) -> Path | None:
+    """Render a previously detected visual without repeating document analysis."""
+    if node.type != ASTNodeType.VISUAL:
+        return None
+    # Only server-generated identifiers may resolve filesystem paths.
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", ast.doc_id) or not re.fullmatch(r"[a-zA-Z0-9_-]+", node.id):
+        return None
+    path = CROPS_DIR / f"{node.id}.webp"
+    if path.exists():
+        return path
+    if node.bbox:
+        pdf_path = DOCS_DIR / f"{ast.doc_id}.pdf"
+        if not pdf_path.exists():
+            return None
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        try:
+            if not 1 <= node.page <= len(pdf):
+                return None
+            page = pdf[node.page - 1]
+            bitmap = page.render(scale=2.0)
+            try:
+                image = bitmap.to_pil()
+                width, height = image.size
+                x0, y0, x1, y1 = node.bbox
+                left = max(0, min(width - 2, int(x0 / page.get_width() * width)))
+                right = max(left + 1, min(width, int(x1 / page.get_width() * width)))
+                top = max(0, min(height - 2, int((page.get_height() - y1) / page.get_height() * height)))
+                bottom = max(top + 1, min(height, int((page.get_height() - y0) / page.get_height() * height)))
+                image.crop((left, top, right, bottom)).save(path, "WEBP", quality=85)
+            finally:
+                bitmap.close()
+        finally:
+            pdf.close()
+    else:
+        render_text_visual_crop(node.id, node.title, node.text)
+    return path
 
 
 def _wire_bidirectional_link(p_node: ASTNode, v_node: ASTNode, tier: int, weight: float) -> None:
@@ -483,6 +529,7 @@ def build_document_ast(
     pages: List[Dict[str, Any]],
     pdf_bytes: Optional[bytes] = None,
     doc_title: Optional[str] = None,
+    lazy_visuals: bool = False,
 ) -> DocumentAST:
     """
     Master Ingestion Function:
@@ -536,7 +583,9 @@ def build_document_ast(
 
         # Render a real WebP visual crop for text/markdown tables if not a PDF
         img_url = None
-        if not pdf_bytes:
+        if lazy_visuals and not pdf_bytes:
+            img_url = f"/api/crop/{doc_id}/{vis_id}"
+        elif not pdf_bytes:
             try:
                 img_url = render_text_visual_crop(vis_id, clean_title, full_table_text)
             except Exception as e:
@@ -689,7 +738,7 @@ def build_document_ast(
 
     # 2. Extract visual crops if PDF bytes are available
     if pdf_bytes:
-        visual_nodes = extract_halo_crops(doc_id, pdf_bytes)
+        visual_nodes = extract_halo_crops(doc_id, pdf_bytes, render_crops=not lazy_visuals)
         # Attach each PDF visual node to the section active on its page (or root fallback)
         sections_by_page: Dict[int, str] = {}
         for n in ast.nodes.values():
@@ -712,7 +761,9 @@ def build_document_ast(
                         and existing.page == v_node.page
                         and existing.title.lower() == v_node.title.lower()
                     ):
-                        existing.image_url = v_node.image_url
+                        existing.image_url = (
+                            f"/api/crop/{doc_id}/{existing.id}" if lazy_visuals else v_node.image_url
+                        )
                         existing.bbox = v_node.bbox
                 continue
 

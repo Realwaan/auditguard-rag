@@ -1,6 +1,8 @@
 import asyncio
 import json
 import time
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -13,15 +15,12 @@ from app.config import (
     DOCS_DIR, TOP_K, USE_GOOGLE_GENAI, MAX_UPLOAD_SIZE_BYTES,
     get_active_gemma_model, set_active_gemma_model
 )
-from app.ingest import (
-    extract_pages_from_pdf, extract_pages_from_text,
-    render_page_previews, hierarchical_chunk, get_or_render_page_image,
-    sanitize_doc_id
-)
-from app.ast_builder import build_document_ast, DocumentAST, ASTNodeType
+from app.ingest import get_or_render_page_image
+from app.ast_builder import DocumentAST, ASTNodeType, get_or_render_visual_crop
 from app.vector_store import LanceVectorStore
 from app.discrepancy_scanner import scan_ast_for_discrepancies
-from app.embeddings import embed_texts
+from app.embeddings import get_embedding_model
+from app.indexing import BackgroundIndexer, prepare_document, load_cached_ast
 from app.retriever import HybridRetriever
 from app.evaluator import evaluate_relevance, verify_generated_answer
 from app.generator import (
@@ -32,7 +31,27 @@ from app.llm import call_plain_gemma_with_telemetry, is_llm_configured
 from app.audit_scanner import run_compliance_audit
 from app.exporter import build_pdf_bytes, build_docx_bytes, build_csv_string
 
-app = FastAPI(title="AuditGuard RAG • Hierarchical Multimodal Tree-RAG", version="2.0.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # Warm up before accepting attachments; a transient model failure remains retryable.
+    started = time.perf_counter()
+    try:
+        await asyncio.to_thread(get_embedding_model)
+        app.state.embedding_preload_succeeded = True
+    except Exception:
+        app.state.embedding_preload_succeeded = False
+        logger.exception("Embedding model preload failed; attachment will retry initialization")
+    app.state.embedding_preload_ms = round((time.perf_counter() - started) * 1000, 2)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(BACKGROUND_INDEXER.shutdown)
+
+
+app = FastAPI(title="AuditGuard RAG • Hierarchical Multimodal Tree-RAG", version="2.0.0", lifespan=lifespan)
 
 # Mount Static Files (Frontend UI, Visual Page Previews & Lossless Crops)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -48,6 +67,7 @@ ACTIVE_DOC_ID: str = ""
 DOCUMENT_VAULT: dict = {}
 DOCUMENT_ASTS: dict[str, DocumentAST] = {}
 LANCE_STORE = LanceVectorStore()
+BACKGROUND_INDEXER = BackgroundIndexer(LANCE_STORE)
 
 ACTIVE_CLASSIFICATION: dict = {
     "type": "NONE",
@@ -73,82 +93,33 @@ class ExportReportRequest(BaseModel):
     format: str = "markdown"
 
 
-async def _ingest_document_into_vault(
-    doc_id: str,
-    filename: str,
-    pages: list[dict],
-    page_images: dict[int, str],
-    pdf_bytes: bytes | None = None,
-) -> dict:
-    """
-    Unified, deterministic ingestion pipeline shared by /upload and /load-sample.
-    Constructs the 3-Tier AST, extracts visual/table crops, builds AST-aligned parent-child chunks,
-    embeds chunks and AST leaves into LanceDB, and updates the active knowledge vault atomically.
-    """
+async def _attach_document(contents: bytes, filename: str, request_started: float) -> dict:
+    """Publish search-ready state before the optional LanceDB embedding pass."""
     global ACTIVE_RETRIEVER, ACTIVE_CHUNKS, ACTIVE_CLASSIFICATION, ACTIVE_DOC_ID
-
-    t_start = time.perf_counter()
-
-    # 1. Build 3-Tier Document AST (automatically extracts PDF crops and Markdown/ASCII tables)
-    ast = await asyncio.to_thread(
-        build_document_ast,
-        doc_id=doc_id,
-        pages=pages,
-        pdf_bytes=pdf_bytes,
-        doc_title=filename,
-    )
-
-    # 2. Hierarchical Chunking synchronized with AST nodes + Automatic Classification
-    chunks, classification = hierarchical_chunk(pages, page_images, ast=ast)
-
-    # 3. Dense Vector Embeddings for Child Units
-    child_texts = [c["child_text"] for c in chunks]
-    embeddings_matrix = await asyncio.to_thread(embed_texts, child_texts)
-
-    # 4. Index AST Leaves into LanceDB with true leaf embeddings
     try:
-        await asyncio.to_thread(LANCE_STORE.index_ast, ast)
-    except Exception as e:
-        print(f"LanceDB indexing warning: {e}")
-
-    # 5. Initialize Hybrid RRF Retriever
-    retriever = HybridRetriever(chunks, embeddings_matrix)
-    indexing_ms = round((time.perf_counter() - t_start) * 1000, 2)
-    cross_links_count = len(ast.get_cross_modal_links())
-
-    vault_entry = {
-        "doc_id": doc_id,
-        "filename": filename,
-        "pages": len(pages),
-        "total_chunks": len(chunks),
-        "total_ast_nodes": len(ast.nodes),
-        "cross_modal_links": cross_links_count,
-        "indexing_duration_ms": indexing_ms,
-        "classification": classification,
-        "retriever": retriever,
-        "ast": ast,
-        "chunks": chunks,
-        "uploaded_at": datetime.now().strftime("%H:%M:%S")
-    }
-
+        entry = await asyncio.to_thread(prepare_document, contents, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    doc_id = entry["doc_id"]
+    entry["uploaded_at"] = datetime.now().strftime("%H:%M:%S")
+    entry["background_indexing"] = BACKGROUND_INDEXER.submit(entry["ast"])
     async with STATE_LOCK:
-        DOCUMENT_ASTS[doc_id] = ast
-        DOCUMENT_VAULT[doc_id] = vault_entry
-        ACTIVE_RETRIEVER = retriever
-        ACTIVE_CHUNKS = chunks
-        ACTIVE_CLASSIFICATION = classification
+        DOCUMENT_ASTS[doc_id] = entry["ast"]
+        DOCUMENT_VAULT[doc_id] = entry
+        ACTIVE_RETRIEVER = entry["retriever"]
+        ACTIVE_CHUNKS = entry["chunks"]
+        ACTIVE_CLASSIFICATION = entry["classification"]
         ACTIVE_DOC_ID = doc_id
-
+    entry["attachment_duration_ms"] = round((time.perf_counter() - request_started) * 1000, 2)
     return {
-        "ok": True,
-        "filename": filename,
-        "doc_id": doc_id,
-        "pages_processed": len(pages),
-        "total_chunks": len(chunks),
-        "total_ast_nodes": len(ast.nodes),
-        "cross_modal_links": cross_links_count,
-        "indexing_duration_ms": indexing_ms,
-        "classification": classification,
+        "ok": True, "status": "ready", "filename": filename, "doc_id": doc_id,
+        "pages_processed": entry["pages"], "total_chunks": entry["total_chunks"],
+        "total_ast_nodes": entry["total_ast_nodes"], "cross_modal_links": entry["cross_modal_links"],
+        "indexing_duration_ms": entry["indexing_duration_ms"],
+        "attachment_duration_ms": entry["attachment_duration_ms"],
+        "stage_timings_ms": entry["stage_timings_ms"], "cache_hit": entry["cache_hit"],
+        "cache_warning": entry["cache_warning"], "classification": entry["classification"],
+        "background_indexing": BACKGROUND_INDEXER.snapshot(entry["background_indexing"]),
     }
 
 
@@ -186,6 +157,8 @@ def health_check():
     active_model = get_active_gemma_model()
     return {
         "status": "healthy",
+        "embedding_preload_succeeded": getattr(app.state, "embedding_preload_succeeded", False),
+        "embedding_preload_ms": getattr(app.state, "embedding_preload_ms", None),
         "doc_loaded": len(ACTIVE_CHUNKS) > 0,
         "classification": ACTIVE_CLASSIFICATION.get("label"),
         "chunk_count": len(ACTIVE_CHUNKS),
@@ -203,8 +176,9 @@ async def upload_document(file: UploadFile = File(...)):
     """
     Local Document Ingestion:
     Validates file size & extension, extracts pages, builds the 3-Tier Document AST,
-    extracts collision-bounded halo crops, and indexes into LanceDB & HybridRetriever.
+    detects visual bounds and prepares HybridRetriever. LanceDB runs in the background.
     """
+    request_started = time.perf_counter()
     filename = (file.filename or "uploaded_doc.pdf").strip()
     allowed_exts = (".pdf", ".txt", ".md")
     if not filename.lower().endswith(allowed_exts):
@@ -222,27 +196,7 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"File exceeds maximum allowed size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB."
         )
 
-    doc_id = sanitize_doc_id(filename)
-    is_pdf = filename.lower().endswith(".pdf")
-
-    if is_pdf:
-        pages = await asyncio.to_thread(extract_pages_from_pdf, contents, filename)
-        page_images = await asyncio.to_thread(render_page_previews, contents, doc_id)
-    else:
-        text_str = contents.decode("utf-8", errors="replace")
-        pages = extract_pages_from_text(text_str, filename)
-        page_images = {}
-
-    if not pages:
-        raise HTTPException(status_code=400, detail="Could not extract readable text from document.")
-
-    return await _ingest_document_into_vault(
-        doc_id=doc_id,
-        filename=filename,
-        pages=pages,
-        page_images=page_images,
-        pdf_bytes=contents if is_pdf else None,
-    )
+    return await _attach_document(contents, filename, request_started)
 
 
 @app.post("/ask")
@@ -584,6 +538,18 @@ def get_document_ast_by_id(doc_id: str):
     return DOCUMENT_ASTS[doc_id].to_dict()
 
 
+@app.get("/api/crop/{doc_id}/{node_id}")
+async def get_visual_crop(doc_id: str, node_id: str):
+    ast = DOCUMENT_ASTS.get(doc_id) or await asyncio.to_thread(load_cached_ast, doc_id)
+    node = ast.get_node(node_id) if ast else None
+    if node is None or node.type != ASTNodeType.VISUAL:
+        raise HTTPException(status_code=404, detail="Visual not found.")
+    image_path = await asyncio.to_thread(get_or_render_visual_crop, ast, node)
+    if image_path and image_path.exists():
+        return FileResponse(str(image_path), media_type="image/webp")
+    raise HTTPException(status_code=404, detail="Visual image unavailable.")
+
+
 @app.get("/api/preview/{doc_prefix}/{page_num}")
 async def get_preview_image(doc_prefix: str, page_num: int):
     """
@@ -633,22 +599,15 @@ async def load_sample_document():
     Passes sample_enterprise_sop.txt through the exact same AST, visual table extraction,
     and LanceDB indexing pipeline used for uploaded documents (zero hardcoded AST node overrides).
     """
+    request_started = time.perf_counter()
     sample_filename = "sample_enterprise_sop.txt"
     sample_path = DOCS_DIR / sample_filename
     if not sample_path.exists():
         sample_path.write_text(SAMPLE_SOP_CONTENT, encoding="utf-8")
     sample_content = sample_path.read_text(encoding="utf-8")
 
-    sample_doc_id = "sample_enterprise_sop"
-    pages = extract_pages_from_text(sample_content, sample_filename)
+    return await _attach_document(sample_content.encode("utf-8"), sample_filename, request_started)
 
-    return await _ingest_document_into_vault(
-        doc_id=sample_doc_id,
-        filename=sample_filename,
-        pages=pages,
-        page_images={},
-        pdf_bytes=None,
-    )
 
 
 @app.get("/vault")
@@ -664,6 +623,11 @@ def get_vault():
             "total_ast_nodes": v.get("total_ast_nodes", 0),
             "cross_modal_links": v.get("cross_modal_links", 0),
             "indexing_duration_ms": v.get("indexing_duration_ms", 0),
+            "attachment_duration_ms": v.get("attachment_duration_ms", 0),
+            "stage_timings_ms": v.get("stage_timings_ms", {}),
+            "cache_hit": v.get("cache_hit", False),
+            "cache_warning": v.get("cache_warning"),
+            "background_indexing": BACKGROUND_INDEXER.snapshot(v.get("background_indexing", {})),
             "classification": v["classification"],
             "uploaded_at": v["uploaded_at"],
             "is_active": (v["doc_id"] == ACTIVE_DOC_ID)
